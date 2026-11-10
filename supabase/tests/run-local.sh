@@ -2,6 +2,25 @@
 # Disposable shared-project PostgreSQL test; no hosted credentials or networking.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The default command executes BOTH isolated policy scenarios. Each child run
+# gets a new PostgreSQL container, so role/cluster setup cannot leak between them.
+if [ "$#" -eq 0 ]; then
+  bash "$0" --adversarial
+  bash "$0" --hosted-policies
+  exit
+fi
+case "$1" in
+  --adversarial)
+    policy_fixture='shared-project-fixture.sql'
+    legacy_checks='legacy-behavior.sql'
+    ;;
+  --hosted-policies)
+    policy_fixture='hosted-policy-fixture.sql'
+    legacy_checks='hosted-policy-behavior.sql'
+    ;;
+  *) echo 'Usage: run-local.sh [--adversarial|--hosted-policies]' >&2; exit 2 ;;
+esac
+printf 'Database scenario: %s\n' "$1"
 node "$repo_root/supabase/build-installer.mjs" --check
 container_name="simple-grant-db-test-$$"
 image='postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac'
@@ -23,8 +42,9 @@ done
 if [ "$ready" != true ]; then docker logs "$container_name"; exit 1; fi
 run_sql() { docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 < "$1"; }
 run_sql "$repo_root/supabase/tests/bootstrap-local.sql"
-run_sql "$repo_root/supabase/tests/shared-project-fixture.sql"
-run_sql "$repo_root/supabase/tests/legacy-behavior.sql"
+run_sql "$repo_root/supabase/tests/shared-project-common.sql"
+run_sql "$repo_root/supabase/tests/$policy_fixture"
+run_sql "$repo_root/supabase/tests/$legacy_checks"
 docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 -tA \
   < "$repo_root/supabase/verify-shared-project.sql" > "$test_dir/before.json"
 # Prove an incompatible existing SG bucket aborts the WHOLE combined installer.
@@ -71,5 +91,5 @@ case "$(cat "$test_dir/reinstall-error.log")" in
   *'schema "simple_grant" already exists'*) ;;
   *) cat "$test_dir/reinstall-error.log" >&2; exit 1 ;;
 esac
-run_sql "$repo_root/supabase/tests/legacy-behavior.sql"
+run_sql "$repo_root/supabase/tests/$legacy_checks"
 run_sql "$repo_root/supabase/tests/rls.sql"

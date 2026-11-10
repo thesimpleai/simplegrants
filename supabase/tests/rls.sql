@@ -8,6 +8,7 @@ insert into auth.users(id, email) values
  ('10000000-0000-4000-8000-000000000003', 'viewer@example.invalid');
 
 set local role authenticated;
+select set_config('request.jwt.claim.role','authenticated',true);
 select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000001', true);
 do $$
 declare v_org simple_grant.organizations;
@@ -64,6 +65,23 @@ begin
   exception when check_violation then null;
   end;
   insert into storage.objects(bucket_id,name) values ('simple-grant-documents',v_org::text||'/evidence.pdf');
+  if (select count(*) from storage.objects where bucket_id = 'simple-grant-documents' and name = v_org::text||'/evidence.pdf') <> 1 then
+    raise exception 'Owner cannot read own SG evidence';
+  end if;
+  insert into storage.objects(bucket_id,name) values ('simple-grant-documents',v_org::text||'/owner-crud.pdf');
+  update storage.objects set name = v_org::text||'/owner-crud-renamed.pdf'
+    where bucket_id = 'simple-grant-documents' and name = v_org::text||'/owner-crud.pdf';
+  if not found then raise exception 'Owner cannot update own SG evidence'; end if;
+  delete from storage.objects where bucket_id = 'simple-grant-documents' and name = v_org::text||'/owner-crud-renamed.pdf';
+  if not found then raise exception 'Owner cannot delete own SG evidence'; end if;
+  if exists (select 1 from storage.objects where bucket_id = 'simple-grant-documents' and name like current_setting('test.org_b')||'/%') then
+    raise exception 'Owner could read a different organisation storage';
+  end if;
+  update storage.objects set name = current_setting('test.org_b')||'/cross-update.pdf'
+    where bucket_id = 'simple-grant-documents' and name like current_setting('test.org_b')||'/%';
+  if found then raise exception 'Owner could update a different organisation storage'; end if;
+  delete from storage.objects where bucket_id = 'simple-grant-documents' and name like current_setting('test.org_b')||'/%';
+  if found then raise exception 'Owner could delete a different organisation storage'; end if;
   begin
     insert into simple_grant.opportunities(org_id,title) values (current_setting('test.org_b')::uuid,'Forbidden');
     raise exception 'Cross-tenant insert allowed';
@@ -105,6 +123,7 @@ insert into simple_grant.organization_members(org_id,user_id,role) values
  (current_setting('test.org_a')::uuid, '10000000-0000-4000-8000-000000000003', 'viewer'),
  (current_setting('test.org_b')::uuid, '10000000-0000-4000-8000-000000000001', 'member');
 set local role authenticated;
+select set_config('request.jwt.claim.role','authenticated',true);
 select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000001', true);
 do $$
 begin
@@ -124,6 +143,15 @@ begin
   if (select count(*) from simple_grant.documents) <> 1 then raise exception 'Viewer cannot read own evidence'; end if;
   if (select count(*) from storage.objects where bucket_id = 'simple-grant-documents') <> 1 then raise exception 'Viewer cannot read storage metadata'; end if;
   begin
+    insert into storage.objects(bucket_id,name) values ('simple-grant-documents',current_setting('test.org_a')||'/viewer.pdf');
+    raise exception 'Viewer could upload SG evidence';
+  exception when insufficient_privilege then null;
+  end;
+  update storage.objects set name = current_setting('test.org_a')||'/viewer-update.pdf' where bucket_id = 'simple-grant-documents';
+  if found then raise exception 'Viewer could update SG evidence'; end if;
+  delete from storage.objects where bucket_id = 'simple-grant-documents';
+  if found then raise exception 'Viewer could delete SG evidence'; end if;
+  begin
     insert into simple_grant.opportunities(org_id,title) values (current_setting('test.org_a')::uuid,'Viewer write');
     raise exception 'Viewer can create opportunity';
   exception when insufficient_privilege then null;
@@ -140,6 +168,7 @@ $$;
 
 reset role;
 set local role service_role;
+select set_config('request.jwt.claim.role','service_role',true);
 do $$
 declare v_org uuid := current_setting('test.org_a')::uuid;
 begin
@@ -158,6 +187,7 @@ $$;
 
 reset role;
 set local role authenticated;
+select set_config('request.jwt.claim.role','authenticated',true);
 select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000003', true);
 do $$
 begin
@@ -213,6 +243,7 @@ end;
 $$;
 reset role;
 set local role service_role;
+select set_config('request.jwt.claim.role','service_role',true);
 do $$
 begin
   if simple_grant.claim_email_ai_request(current_setting('test.org_a')::uuid,'10000000-0000-4000-8000-000000000001') then
@@ -230,6 +261,7 @@ end;
 $$;
 reset role;
 set local role authenticated;
+select set_config('request.jwt.claim.role','authenticated',true);
 select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000002', true);
 do $$
 declare i integer;
@@ -248,6 +280,7 @@ $$;
 reset role;
 select set_config('request.jwt.claim.sub','',true);
 set local role anon;
+select set_config('request.jwt.claim.role','anon',true);
 do $$
 begin
   if simple_grant.can_access_org(current_setting('test.org_a')::uuid)
@@ -265,7 +298,7 @@ begin
   begin
     update storage.objects set bucket_id = 'simple-grant-documents',name = current_setting('test.org_a')||'/moved.pdf'
       where bucket_id = 'pdfs' and name = 'legacy-public.pdf';
-    raise exception 'Legacy permissive policy allowed moving public file into SG';
+    if found then raise exception 'Legacy permissive policy allowed moving public file into SG'; end if;
   exception when insufficient_privilege then null;
   end;
   update storage.objects set name = 'forbidden-update.pdf' where bucket_id = 'simple-grant-documents';
@@ -291,6 +324,7 @@ end;
 $$;
 reset role;
 set local role legacy_app;
+select set_config('request.jwt.claim.role','legacy_app',true);
 select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002',true);
 do $$
 begin

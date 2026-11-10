@@ -6,6 +6,7 @@ declare v_role text; v_rows integer;
 begin
   foreach v_role in array array['authenticated','anon','legacy_app'] loop
     execute format('set local role %I',v_role);
+    perform set_config('request.jwt.claim.role',v_role,true);
     if (select count(*) from storage.objects where bucket_id = 'pdfs') <> 1 then
       raise exception 'Legacy pdfs read changed for %',v_role;
     end if;
