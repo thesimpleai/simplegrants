@@ -5,6 +5,8 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # The public email sender is documented in the repository, not a credential.
+  SECRETS_SCAN_OMIT_KEYS = "EMAIL_FROM"
 
 [functions]
   node_bundler = "esbuild"
