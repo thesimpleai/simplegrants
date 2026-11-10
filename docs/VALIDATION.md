@@ -47,18 +47,43 @@ This historical version required six new settings and Turnstile. Those requireme
 
 These are local code/database checks, not hosted provider delivery or account-setting verification. A mocked email/API test is not proof that the sending domain is verified or that a real login email/callback works. No real login email has been sent by these local checks.
 
-## Simplified app-specific login (current)
+## Simplified app-specific login (before comprehensive source review)
 
-The staged `fix/simple-grants-auth` flow now uses only the existing Supabase, Resend and Netlify services, with four new server settings. It removes the CAPTCHA dependency while retaining mandatory migration 005, HMAC email/IP quotas, exact canonical-Origin checks, Netlify-provided request IP, an optional honeypot, generic acknowledgements, app-local logout and explicit confirmation of the private token fragment. Other applications' global Auth settings remain unchanged.
+This version uses only the existing Supabase, Resend and Netlify services, with four new server settings. It removes the CAPTCHA dependency while retaining mandatory migration 005, HMAC email/IP quotas, exact canonical-Origin checks, Netlify-provided request IP, an optional honeypot, generic acknowledgements, app-local logout and explicit confirmation of the private token fragment. Other applications' global Auth settings remain unchanged.
 
 The SQL limits are unchanged: sixty-second email cooldown, five claimed requests per email per hour and twenty per IP per hour. Automated clients can spoof Origin, omit the honeypot and distribute requests across IPs. Existing-user-only delivery is the default; enabling public signups increases abuse exposure. These controls do not establish comprehensive bot prevention.
 
-Production rollout waits for migration 005, the four login settings and Resend sender verification/DNS. The previous **77 unit / 17 browser** results describe the superseded CAPTCHA version. The simplified version was validated locally on 11 November 2026:
+This run assumed migration 005, the four login settings and Resend sender verification/DNS as deployment prerequisites. The previous **77 unit / 17 browser** results describe the superseded CAPTCHA version. The simplified version was validated locally on 11 November 2026:
 
 - `npm test`: **78 tests passed across eight files**, including plain email-only requests with no CAPTCHA environment settings or external verification calls, honeypot suppression, mandatory quota failure handling, token/session boundaries and provider-error acknowledgements.
 - `npm run build`: TypeScript and the production frontend build passed.
 - `npm run test:browser`: **17 workflows passed**, including immediate email-form use, duplicate submission prevention, failed-request retry, hidden-field propagation, no Cloudflare assets or native Supabase OTP requests, explicit confirmation and unsolicited URL-token rejection.
 - `npm run db:check`: the generated installer still matches its canonical sources. Migration 005 and its previously tested SQL rate limits/concurrency logic did not change in this simplification. No real login email or provider/account settings have been changed by these local checks.
+
+## Comprehensive check (current, 11 November 2026)
+
+The user reports that the auth prerequisites are complete. The production branch is `main`; a GitHub revision is not proof that Netlify has deployed it. No account configuration, hosted migration, real sign-in email or production application behaviour has been independently verified by this check.
+
+The review identified four defects, with local regression coverage:
+
+- Workspace database failures now show a persistent error and retry action, instead of appearing as an empty organisation or data set.
+- Report prompts use an explicit whitelist of project evidence and the recorded expense ledger. A saved AI report is excluded from the next report's source context.
+- Grant rediscovery refreshes public metadata while preserving existing round dates and history. Clearly later rounds get separate records; uncertain date changes get review flags and a visible badge/notice. Expired or archived saved rounds are excluded from current search/digest results.
+- On a 720px-high desktop viewport, the signed-in sidebar could leave Sign out below the reachable area. Sidebar scrolling/sizing fixes passed the full browser suite with real clicks at the unchanged viewport, including Overview, Settings and Sign out.
+
+The first three findings came from source inspection; the sidebar problem was reproduced in a local browser trace. None was observed on the production site. Final local results:
+
+- `npm test`: **86 of 86 tests passed across nine files**, including report-context, discovery-round and same-Melbourne-calendar-day boundary regressions.
+- `npm run build`: TypeScript and the production Vite build passed after the final sidebar CSS fix.
+- `npm run test:db`: all **three pristine database scenarios** passed, including the 005-only upgrade preserving existing data and quota concurrency checks. `npm run db:check` confirmed that the combined installer matches the canonical migration sources. The harness uses test-only Auth/Storage stubs, not a hosted Supabase deployment.
+- All **four** Netlify Functions packaged for Node 22 with esbuild. Local GET probes returned **405** for the three POST-only API endpoints. The scheduled digest module was imported only; its handler was not invoked and no real email was sent.
+- `npm run test:browser`: **22 of 22 Chromium workflows passed** in 12.5 seconds: the original 17 plus five error/recovery cases. Real navigation and Sign out clicks passed at the unchanged 720px-high desktop viewport; no forced click or assertion relaxation was used.
+
+`npm audit --omit=dev --json` also reported **0 vulnerabilities across 63 production dependencies**. This reflects the npm registry advisories available at check time; it does not verify application logic or hosted configuration. No dependency upgrades were required.
+
+Live HTTP requests were blocked at the task's proxy with **CONNECT 403**; browser navigation failed with **ERR_TUNNEL_CONNECTION_FAILED**. The running environment reported an enforced network policy with an empty custom `allowed_hosts` list, while the saved configuration draft contained the required application destinations. A current status recheck still reported enforced restricted policy at spec/observed revision 1, with the required application domains absent from the effective allowlist. A saved draft does not establish that its policy is active. These transport failures occurred before an application response and do not establish that the website is down or its account setup is wrong.
+
+The current release uses only Supabase, Resend and Netlify for login, with four server auth settings and no additional provider. The SQL 005 limits and shared-Auth boundaries remain as documented in `AUTHENTICATION.md`. Hosted checks remain blocked until task connectivity is restored. The completed setup should not be repeated merely because this executor could not reach the site.
 
 ## Not yet validated
 

@@ -17,6 +17,9 @@ export interface AppContextValue {
   organisations: Organisation[];
   data: OrgData;
   loading: boolean;
+  connectionError: string | null;
+  organisationsLoaded: boolean;
+  retryConnection: () => Promise<void>;
   toast: string;
   notify: (message: string) => void;
   selectOrg: (id: string) => void;

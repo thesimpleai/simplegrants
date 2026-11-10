@@ -34,11 +34,11 @@ Row-level security separates organisations within Simple Grant. One login can ow
 
 ## 2. Connect Netlify to GitHub
 
-1. In Netlify, import `thesimpleai/simplegrants` and select the branch containing the application.
+1. In Netlify, connect `thesimpleai/simplegrants` and use `main` as the production branch.
 2. Use the repository's `netlify.toml`: Node 22, build command `npm run build`, publish directory `dist`, and functions directory `netlify/functions`.
 3. Add the environment variables below. Public Vite values must be available during the build. All other API keys must be available to Functions, including scheduled functions. Give preview deploys separate non-production service credentials, or leave their live integrations disabled.
-4. Before production rollout, complete [Authentication](AUTHENTICATION.md): working HTTPS on `https://simplegrants.com.au`, migration 005, the four new login settings and verified Resend login sender. Keep the change on `fix/simple-grants-auth` until those prerequisites are configured. Default preview origins intentionally cannot exercise the production login route.
-5. Then merge and deploy the branch. Changing a `VITE_` variable requires rebuilding the frontend; redeploy after runtime secret changes. Request a fresh application-specific email and test sign-in and a protected grant deep link on the canonical domain. Old native Supabase links are not consumed after rollout. Leave the shared Supabase global Auth configuration unchanged.
+4. Before production rollout, complete [Authentication](AUTHENTICATION.md): working HTTPS on `https://simplegrants.com.au`, migration 005, the four new login settings and verified Resend login sender. Verify these prerequisites for the deployment environment and skip migrations that are already installed. Local tests do not establish provider configuration or real delivery. Default preview origins intentionally cannot exercise the production login route.
+5. Deploy the current `main` revision and wait for the Netlify production deployment to complete. A source push alone does not establish the live revision. Changing a `VITE_` variable requires rebuilding the frontend; redeploy after runtime secret changes. Request a fresh application-specific email and test sign-in and a protected grant deep link on the canonical domain. Old native Supabase links are not consumed after rollout. Leave the shared Supabase global Auth configuration unchanged.
 
 ### Required environment variables
 

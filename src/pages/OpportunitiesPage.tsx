@@ -245,6 +245,9 @@ export default function OpportunitiesPage({
                     ? "Example opportunity"
                     : "Source found · review fit"}
                 </Badge>
+                {o.provenance.date_review_required === true && (
+                  <Badge tone="cream">Check application dates</Badge>
+                )}
               </div>
               <button
                 className={`icon-button bookmark ${o.status === "saved" ? "is-saved" : ""}`}
@@ -345,6 +348,13 @@ export default function OpportunitiesPage({
             {Boolean(opportunity.provenance.demo) && (
               <Notice>
                 This is an illustrative opportunity, not a live grant listing.
+              </Notice>
+            )}
+            {opportunity.provenance.date_review_required === true && (
+              <Notice>
+                We couldn’t confirm this grant round’s dates. Check the funder’s
+                current listing before planning your application. Previously
+                saved dates are shown below where available.
               </Notice>
             )}
             <p>{opportunity.summary}</p>

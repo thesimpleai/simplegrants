@@ -10,6 +10,7 @@ import {
 } from "./core";
 import { checked, type AppDb } from "./db";
 import { DOCUMENT_BUCKET } from "../../../src/lib/constants";
+import { discoveredRound } from "./opportunity-rounds";
 import type {
   DocumentRecord,
   Opportunity,
@@ -257,11 +258,14 @@ export async function discoverOpportunities(db: AppDb, org: Organisation) {
     .max(6)
     .parse(extracted.opportunities ?? []);
   const opportunities: Opportunity[] = [];
+  let reviewRequired = false;
+  const now = new Date();
   for (const grant of rows) {
     const source = sources[grant.source_index];
     if (!source) continue;
     const closes_at = sourceDeadline(grant.closes_at);
-    if (closes_at && new Date(closes_at) < new Date()) continue;
+    if (closes_at && new Date(closes_at) < now) continue;
+    const opens_on = dateOnly(grant.opens_on);
     const existing = checked(
       await db
         .from("opportunities")
@@ -269,10 +273,64 @@ export async function discoverOpportunities(db: AppDb, org: Organisation) {
         .eq("org_id", org.id)
         .eq("source_url", source.uri)
         .eq("title", grant.title)
-        .limit(1),
+        .order("created_at", { ascending: false })
+        .limit(50),
     ) as Opportunity[];
-    if (existing.length) {
-      opportunities.push(existing[0]);
+    const round = discoveredRound(existing, { opens_on, closes_at }, now);
+    const publicFields = {
+      funder: grant.funder,
+      summary: grant.summary,
+      amount_min: grant.amount_min ?? null,
+      amount_max: grant.amount_max ?? null,
+      location: grant.location || org.state,
+      focus_areas: grant.focus_areas || [],
+      requirements: grant.requirements || [],
+      match_score: null,
+    };
+    const provenance = {
+      method: "google_search_grounding",
+      sources,
+      discovered_at: now.toISOString(),
+      eligibility_verified: false,
+    };
+    if (round.kind !== "new") {
+      const savedRound = round.existing;
+      const expired =
+        !!savedRound.closes_at && new Date(savedRound.closes_at) < now;
+      const dateReview = round.kind === "review" || expired;
+      reviewRequired ||= dateReview;
+      const saved = checked(
+        await db
+          .from("opportunities")
+          .update({
+            ...publicFields,
+            funder: grant.funder || savedRound.funder,
+            summary: grant.summary || savedRound.summary,
+            location: grant.location || savedRound.location,
+            // A new search cannot silently change established round dates.
+            opens_on: savedRound.opens_on ?? opens_on,
+            closes_at: savedRound.closes_at ?? closes_at,
+            provenance: {
+              ...savedRound.provenance,
+              ...provenance,
+              guidelines_required: !savedRound.guidelines_text.trim(),
+              date_review_required: dateReview,
+              date_conflicts: round.conflicts,
+              proposed_round_dates: dateReview ? { opens_on, closes_at } : null,
+              latest_search_dates_unconfirmed: !opens_on || !closes_at,
+            },
+          })
+          .eq("org_id", org.id)
+          .eq("id", savedRound.id)
+          .select("*")
+          .single(),
+      ) as Opportunity;
+      // Preserve the historical record, but never advertise an expired round as current.
+      if (
+        saved.status !== "archived" &&
+        (!saved.closes_at || new Date(saved.closes_at) >= now)
+      )
+        opportunities.push(saved);
       continue;
     }
     const saved = checked(
@@ -281,25 +339,17 @@ export async function discoverOpportunities(db: AppDb, org: Organisation) {
         .insert({
           org_id: org.id,
           title: grant.title,
-          funder: grant.funder,
-          summary: grant.summary,
           source_url: source.uri,
+          ...publicFields,
           guidelines_text: "",
-          amount_min: grant.amount_min ?? null,
-          amount_max: grant.amount_max ?? null,
-          opens_on: dateOnly(grant.opens_on),
+          opens_on,
           closes_at,
-          location: grant.location || org.state,
-          focus_areas: grant.focus_areas || [],
-          requirements: grant.requirements || [],
-          match_score: null,
           status: "open",
           provenance: {
-            method: "google_search_grounding",
-            sources,
-            discovered_at: new Date().toISOString(),
-            eligibility_verified: false,
+            ...provenance,
             guidelines_required: true,
+            date_review_required: !opens_on && !closes_at,
+            ...(round.previous ? { previous_round_id: round.previous.id } : {}),
           },
         })
         .select("*")
@@ -310,9 +360,11 @@ export async function discoverOpportunities(db: AppDb, org: Organisation) {
   return {
     opportunities,
     sources,
-    message: opportunities.length
-      ? "Source-backed search results saved. Check current eligibility, dates and guidelines with each provider."
-      : "No current grants could be established from the search. Try adding a grant manually.",
+    message: reviewRequired
+      ? "Search results saved. Some round dates need review against the provider; expired saved rounds have not been listed as current opportunities."
+      : opportunities.length
+        ? "Source-backed search results saved. Check current eligibility, dates and guidelines with each provider."
+        : "No current grants could be established from the search. Try adding a grant manually.",
   };
 }
 export async function importOpportunity(

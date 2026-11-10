@@ -42,6 +42,39 @@ const navigation = [
 function currentPage() {
   return new URLSearchParams(window.location.search).get("view") ?? "overview";
 }
+function WorkspaceConnectionIssue({
+  message,
+  loading,
+  onRetry,
+}: {
+  message: string;
+  loading: boolean;
+  onRetry: () => Promise<void>;
+}) {
+  return (
+    <section
+      className="card stack"
+      role="alert"
+      aria-labelledby="workspace-connection-title"
+    >
+      <span className="icon-tile">
+        <Building2 size={26} />
+      </span>
+      <h2 id="workspace-connection-title">We couldn’t load your workspace.</h2>
+      <p>{message}</p>
+      <p className="muted">
+        Your saved organisations and documents have not been removed.
+      </p>
+      <button
+        className="button primary align-start"
+        disabled={loading}
+        onClick={() => void onRetry()}
+      >
+        {loading ? <Busy label="Connecting…" /> : "Retry connection"}
+      </button>
+    </section>
+  );
+}
 export default function App() {
   const app = useApp();
   const [page, setPage] = useState(currentPage),
@@ -72,6 +105,12 @@ export default function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+  useEffect(() => {
+    if (app.configured && (!app.organisationsLoaded || app.connectionError)) {
+      setNewOrg(false);
+      setPicker(false);
+    }
+  }, [app.configured, app.organisationsLoaded, app.connectionError]);
   async function create() {
     setBusy(true);
     setError("");
@@ -132,64 +171,90 @@ export default function App() {
         </div>
         <main className="login-form">
           <span className="eyebrow">WELCOME TO SIMPLE GRANT</span>
-          <h2>Let’s get you settled in.</h2>
-          <p>Use your email to sign in securely. No password to remember.</p>
-          <form
-            className="stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              login();
-            }}
-          >
-            <label className="form-field">
-              Your email address
-              <input
-                type="email"
-                required
-                autoComplete="email"
-                placeholder="you@yourorganisation.org.au"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+          {app.connectionError ? (
+            <div className="stack">
+              <WorkspaceConnectionIssue
+                message={app.connectionError}
+                loading={app.loading}
+                onRetry={app.retryConnection}
               />
-            </label>
-            <div className="auth-honeypot" aria-hidden="true">
-              <label>
-                Leave this field empty
-                <input
-                  type="text"
-                  name="website"
-                  autoComplete="off"
-                  tabIndex={-1}
-                  value={website}
-                  onChange={(e) => setWebsite(e.target.value)}
-                />
-              </label>
+              <button
+                className="button secondary align-start"
+                onClick={() =>
+                  app
+                    .signOut()
+                    .catch((issue) => app.notify(errorMessage(issue)))
+                }
+              >
+                Back to sign-in
+              </button>
             </div>
-            <button className="button primary" disabled={busy}>
-              {busy ? (
-                <Busy label="Sending your link…" />
-              ) : (
-                <>
-                  Email me a sign-in link <ArrowRight size={17} />
-                </>
-              )}
-            </button>
-            {emailSent && (
-              <Notice>
-                If this address can sign in, you’ll receive an email from Simple
-                Grants. Open the link, then choose Sign in. Your grant link will
-                be waiting when you return.
-              </Notice>
-            )}
-            {error && (
-              <p role="alert" className="error-box">
-                {error}
+          ) : app.loading ? (
+            <Busy label="Checking your sign-in session…" />
+          ) : (
+            <>
+              <h2>Let’s get you settled in.</h2>
+              <p>
+                Use your email to sign in securely. No password to remember.
               </p>
-            )}
-          </form>
-          <p className="muted small">
-            One login. All your organisations. A little less to remember.
-          </p>
+              <form
+                className="stack"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  login();
+                }}
+              >
+                <label className="form-field">
+                  Your email address
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@yourorganisation.org.au"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
+                </label>
+                <div className="auth-honeypot" aria-hidden="true">
+                  <label>
+                    Leave this field empty
+                    <input
+                      type="text"
+                      name="website"
+                      autoComplete="off"
+                      tabIndex={-1}
+                      value={website}
+                      onChange={(e) => setWebsite(e.target.value)}
+                    />
+                  </label>
+                </div>
+                <button className="button primary" disabled={busy}>
+                  {busy ? (
+                    <Busy label="Sending your link…" />
+                  ) : (
+                    <>
+                      Email me a sign-in link <ArrowRight size={17} />
+                    </>
+                  )}
+                </button>
+                {emailSent && (
+                  <Notice>
+                    If this address can sign in, you’ll receive an email from
+                    Simple Grants. Open the link, then choose Sign in. Your
+                    grant link will be waiting when you return.
+                  </Notice>
+                )}
+                {error && (
+                  <p role="alert" className="error-box">
+                    {error}
+                  </p>
+                )}
+              </form>
+              <p className="muted small">
+                One login. All your organisations. A little less to remember.
+              </p>
+            </>
+          )}
         </main>
       </div>
     );
@@ -222,6 +287,10 @@ export default function App() {
             className="org-switch"
             onClick={() => setPicker((p) => !p)}
             aria-expanded={picker}
+            disabled={
+              Boolean(app.connectionError) ||
+              (app.configured && !app.organisationsLoaded)
+            }
           >
             <span className="org-monogram">
               {app.org?.name
@@ -387,7 +456,14 @@ export default function App() {
           </div>
         )}
         <main className="main-content" id="main-content">
-          {app.loading && !app.org ? (
+          {app.connectionError ? (
+            <WorkspaceConnectionIssue
+              message={app.connectionError}
+              loading={app.loading}
+              onRetry={app.retryConnection}
+            />
+          ) : (app.configured && !app.organisationsLoaded) ||
+            (app.loading && !app.org) ? (
             <div className="loading-screen">
               <Busy label="Getting your workspace ready…" />
             </div>

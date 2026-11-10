@@ -124,6 +124,12 @@ hr {
   flex-direction: column;
   padding: 32px 19px 16px;
   z-index: 30;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+}
+.sidebar > * {
+  flex-shrink: 0;
 }
 .brand {
   display: flex;
@@ -208,7 +214,7 @@ hr {
   box-shadow: 0 8px 25px #233d3022;
   border: 1px solid var(--line);
   border-radius: 9px;
-  width: 265px;
+  width: 100%;
   padding: 6px;
   z-index: 40;
 }

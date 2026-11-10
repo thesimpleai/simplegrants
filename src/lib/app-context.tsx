@@ -39,7 +39,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       configured ? empty : demoData(demoOrg.id),
     ),
     [loading, setLoading] = useState(configured),
+    [connectionError, setConnectionError] = useState<string | null>(null),
+    [organisationsLoaded, setOrganisationsLoaded] = useState(!configured),
     [toast, setToast] = useState("");
+  const mounted = useRef(false);
+  const currentUserId = useRef<string | null>(null);
+  const authRequest = useRef(0);
+  const organisationRequest = useRef(0);
+  const organisationsReady = useRef(!configured);
+  const failureStage = useRef<"session" | "organizations" | "data" | null>(
+    null,
+  );
+  const retryPending = useRef(false);
   const activeOrg = useRef(orgId);
   activeOrg.current = orgId;
   const request = useRef(0),
@@ -57,61 +68,167 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+  function clearConnectionError() {
+    failureStage.current = null;
+    setConnectionError(null);
+  }
+  function markOrganisationsLoaded(ready: boolean) {
+    organisationsReady.current = ready;
+    setOrganisationsLoaded(ready);
+  }
+  function connectionMessage(
+    error: unknown,
+    stage: "session" | "organizations" | "data",
+  ) {
+    if (stage === "session")
+      return "We couldn’t restore your sign-in session. Try connecting again, or return to sign-in for a new email link.";
+    const detail =
+      error && typeof error === "object"
+        ? (error as { code?: unknown; status?: unknown; message?: unknown })
+        : {};
+    const code = typeof detail.code === "string" ? detail.code : "";
+    if (
+      ["42501", "PGRST301", "PGRST302"].includes(code) ||
+      detail.status === 401 ||
+      detail.status === 403
+    ) {
+      return "Your workspace needs an administrator to finish checking its connection. Please contact support, then try again.";
+    }
+    if (["PGRST106", "PGRST205", "42P01", "3F000"].includes(code)) {
+      return "Your workspace connection is not fully set up. Please contact support, then try again.";
+    }
+    if (
+      error instanceof TypeError ||
+      /fetch|network|connection|timeout/i.test(
+        typeof detail.message === "string" ? detail.message : "",
+      )
+    ) {
+      return "We couldn’t connect to your workspace. Check your internet connection and try again. If it continues, please contact support.";
+    }
+    return stage === "data"
+      ? "This organisation’s records could not be loaded. Please try again. If it continues, please contact support."
+      : "Your organisations could not be loaded. Please try again. If it continues, please contact support.";
+  }
+  function applyIdentity(nextUser: User | null) {
+    const nextId = nextUser?.id ?? null;
+    if (currentUserId.current !== nextId) {
+      currentUserId.current = nextId;
+      organisationRequest.current++;
+      request.current++;
+      activeOrg.current = "";
+      markOrganisationsLoaded(false);
+      setOrganisations([]);
+      setOrgId("");
+      setData(empty);
+      clearConnectionError();
+      setLoading(Boolean(nextUser));
+    }
+    setUser(nextUser);
+    if (!nextUser) {
+      clearConnectionError();
+      setLoading(false);
+    }
+  }
+  async function restoreSession() {
+    if (!supabase) return;
+    const current = ++authRequest.current;
+    setLoading(true);
+    try {
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.getSession();
+      if (!mounted.current || current !== authRequest.current) return;
+      if (error) throw error;
+      applyIdentity(session?.user ?? null);
+    } catch (error) {
+      if (!mounted.current || current !== authRequest.current) return;
+      failureStage.current = "session";
+      setConnectionError(connectionMessage(error, "session"));
+      setLoading(false);
+    }
+  }
+  async function loadOrganisations(userId: string) {
+    if (!supabase || currentUserId.current !== userId) return;
+    const current = ++organisationRequest.current;
+    setLoading(true);
+    markOrganisationsLoaded(false);
+    const isCurrent = () =>
+      mounted.current &&
+      current === organisationRequest.current &&
+      currentUserId.current === userId;
+    try {
+      const { data: rows, error } = await supabase
+        .from("organizations")
+        .select("*")
+        .order("created_at");
+      if (!isCurrent()) return;
+      if (error) throw error;
+      if (!Array.isArray(rows))
+        throw new Error("The workspace response could not be read.");
+      setOrganisations(rows);
+      setOrgId((previous) =>
+        rows.some((item) => item.id === previous)
+          ? previous
+          : (rows.find(
+              (item) =>
+                item.id ===
+                new URLSearchParams(window.location.search).get("org"),
+            )?.id ??
+            rows[0]?.id ??
+            ""),
+      );
+      markOrganisationsLoaded(true);
+      clearConnectionError();
+    } catch (error) {
+      if (!isCurrent()) return;
+      failureStage.current = "organizations";
+      setConnectionError(connectionMessage(error, "organizations"));
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getSession().then(({ data: { session }, error }) => {
-      if (error) notify(error.message);
-      setUser(session?.user ?? null);
-      if (!session) setLoading(false);
-    });
+    mounted.current = true;
+    void restoreSession();
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) =>
-      setUser(session?.user ?? null),
-    );
-    return () => subscription.unsubscribe();
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      authRequest.current++;
+      applyIdentity(session?.user ?? null);
+    });
+    return () => {
+      mounted.current = false;
+      authRequest.current++;
+      organisationRequest.current++;
+      request.current++;
+      subscription.unsubscribe();
+    };
   }, []);
   useEffect(() => {
-    if (!supabase || !user) {
-      if (configured) {
-        setOrganisations([]);
-        setOrgId("");
-        setData(empty);
-      }
-      return;
-    }
-    let active = true;
-    setLoading(true);
-    supabase
-      .from("organizations")
-      .select("*")
-      .order("created_at")
-      .then(({ data, error }) => {
-        if (!active) return;
-        if (error) notify(error.message);
-        else {
-          setOrganisations(data ?? []);
-          setOrgId((current) =>
-            data?.some((o) => o.id === current)
-              ? current
-              : (data?.find(
-                  (o) =>
-                    o.id ===
-                    new URLSearchParams(window.location.search).get("org"),
-                )?.id ??
-                data?.[0]?.id ??
-                ""),
-          );
-        }
-        setLoading(false);
-      });
+    if (!supabase || !user) return;
+    void loadOrganisations(user.id);
     return () => {
-      active = false;
+      organisationRequest.current++;
     };
-  }, [user]);
+  }, [user?.id]);
   async function refresh() {
-    if (!supabase || !orgId || activeOrg.current !== orgId) return;
+    if (
+      !supabase ||
+      !orgId ||
+      activeOrg.current !== orgId ||
+      !currentUserId.current
+    )
+      return;
     const current = ++request.current;
+    const userId = currentUserId.current;
+    const requestedOrg = orgId;
+    const isCurrent = () =>
+      mounted.current &&
+      current === request.current &&
+      currentUserId.current === userId &&
+      activeOrg.current === requestedOrg;
     setLoading(true);
     const tableNames = [
       "documents",
@@ -123,12 +240,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ];
     try {
       const results = await Promise.all(
-        tableNames.map((t) =>
-          supabase!.from(t).select("*").eq("org_id", orgId),
+        tableNames.map((table) =>
+          supabase!.from(table).select("*").eq("org_id", requestedOrg),
         ),
       );
-      if (current !== request.current) return;
-      for (const r of results) if (r.error) throw r.error;
+      if (!isCurrent()) return;
+      for (const result of results) {
+        if (result.error) throw result.error;
+        if (!Array.isArray(result.data))
+          throw new Error("The organisation records could not be read.");
+      }
       setData({
         documents: results[0].data ?? [],
         opportunities: results[1].data ?? [],
@@ -137,8 +258,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         expenses: results[4].data ?? [],
         messages: results[5].data ?? [],
       });
+      clearConnectionError();
+    } catch (error) {
+      if (!isCurrent()) return;
+      const message = connectionMessage(error, "data");
+      failureStage.current = "data";
+      setConnectionError(message);
+      throw new Error(message);
     } finally {
-      if (current === request.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }
   useEffect(() => {
@@ -148,10 +276,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return;
     }
     setData(configured ? empty : demoData(orgId));
-    if (configured) refresh().catch((e) => notify(e.message));
+    if (configured) {
+      if (failureStage.current === "data") clearConnectionError();
+      void refresh().catch(() => {});
+    }
   }, [orgId]);
+  async function retryConnection() {
+    if (!supabase || retryPending.current) return;
+    retryPending.current = true;
+    try {
+      if (!currentUserId.current || failureStage.current === "session")
+        await restoreSession();
+      else if (
+        organisationsReady.current &&
+        activeOrg.current &&
+        failureStage.current === "data"
+      )
+        await refresh();
+      else await loadOrganisations(currentUserId.current);
+    } catch {
+      // Each loader keeps its own persistent, safe diagnostic in context.
+    } finally {
+      retryPending.current = false;
+    }
+  }
   async function createOrg(name: string, frequency: Frequency) {
     if (!name.trim()) throw new Error("Please enter an organisation name.");
+    if (
+      supabase &&
+      (!currentUserId.current ||
+        !organisationsReady.current ||
+        failureStage.current)
+    )
+      throw new Error(
+        "Reconnect your workspace before adding an organisation.",
+      );
     if (supabase) {
       const { data, error } = await supabase.rpc("create_organization", {
         p_name: name.trim(),
@@ -531,7 +690,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     );
   }
   async function signOut() {
-    if (supabase) await signOutFromSimpleGrant(supabase);
+    if (supabase) {
+      await signOutFromSimpleGrant(supabase);
+      authRequest.current++;
+      applyIdentity(null);
+      setToast("");
+    }
   }
   return (
     <Context.Provider
@@ -543,6 +707,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         organisations,
         data,
         loading,
+        connectionError,
+        organisationsLoaded,
+        retryConnection,
         toast,
         notify,
         selectOrg: (id: string) => {

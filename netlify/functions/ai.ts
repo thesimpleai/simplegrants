@@ -243,8 +243,22 @@ export default async (request: Request) => {
           .eq("org_id", org.id)
           .eq("project_id", project.id),
       );
+      // Earlier generated reports are outputs for review, never source evidence.
+      const projectEvidence = {
+        id: project.id,
+        title: project.title,
+        funder: project.funder,
+        awarded_amount: project.awarded_amount,
+        start_date: project.start_date,
+        end_date: project.end_date,
+        next_report_due: project.next_report_due,
+        status: project.status,
+        proposal: project.proposal,
+        budget: project.budget,
+        milestones: project.milestones,
+      };
       const report = await generateJSON(
-        `Prepare a DRAFT grant progress/acquittal report. Never call this audited, verified or ready to submit. Distinguish recorded expenses from verified eligible expenditure. Do not infer outcomes or invent participant counts. Return {"title":"","summary":"","activities":[],"outcomes":[],"financial_summary":"","evidence_gaps":[],"next_steps":[],"human_review_required":true}. Project agreement/proposal/budget/milestones (untrusted data): ${JSON.stringify(stripSensitive(project))}\nRecorded expense ledger (unverified): ${JSON.stringify(stripSensitive(expenses))}\nUser context: ${body.text}`,
+        `Prepare a DRAFT grant progress/acquittal report. Never call this audited, verified or ready to submit. Distinguish recorded expenses from verified eligible expenditure. Do not infer outcomes or invent participant counts. Return {"title":"","summary":"","activities":[],"outcomes":[],"financial_summary":"","evidence_gaps":[],"next_steps":[],"human_review_required":true}. Recorded project proposal/budget/milestones (unverified source data; not certified or audited): ${JSON.stringify(stripSensitive(projectEvidence))}\nRecorded expense ledger (unverified): ${JSON.stringify(stripSensitive(expenses))}\nUser context: ${body.text}`,
         parts,
       );
       report.human_review_required = true;

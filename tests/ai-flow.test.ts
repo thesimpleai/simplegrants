@@ -26,6 +26,7 @@ let guidelines: string;
 let details: Record<string, unknown>;
 let documents: { name: string; category: string; expires_on: string | null }[];
 let writes: unknown[];
+let project: Record<string, unknown>;
 
 function fakeDb() {
   return {
@@ -58,6 +59,19 @@ function fakeDb() {
             error: null,
           };
         if (table === "documents") return { data: documents, error: null };
+        if (table === "funded_projects")
+          return {
+            data: {
+              ...project,
+              ...(typeof update === "object" && update !== null ? update : {}),
+            },
+            error: null,
+          };
+        if (table === "expenses")
+          return {
+            data: [{ description: "Recorded supplies", amount: 120 }],
+            error: null,
+          };
         if (table === "applications")
           return {
             data: {
@@ -133,6 +147,22 @@ beforeEach(() => {
   };
   documents = [];
   writes = [];
+  project = {
+    id: "6a03978d-6266-46b6-b35e-bf8069e50746",
+    org_id: orgId,
+    title: "Community garden",
+    funder: "Provider",
+    awarded_amount: 5000,
+    start_date: "2026-01-01",
+    end_date: "2026-12-31",
+    next_report_due: "2026-12-20",
+    status: "active",
+    proposal: { activities: "User recorded workshops" },
+    budget: { supplies: 120 },
+    milestones: [],
+    report_draft: { summary: "UNSUPPORTED-PRIOR-AI-SENTINEL" },
+    unexpected_internal_note: "UNLISTED-PROJECT-FIELD",
+  };
   mocks.createClient.mockReturnValue(fakeDb());
   mocks.documentParts.mockResolvedValue({ parts: [], documents: [] });
 });
@@ -260,5 +290,33 @@ describe("original-guideline evidence preflight", () => {
     });
     expect((await call()).status).toBe(200);
     expect(writes).toHaveLength(1);
+  });
+});
+
+describe("report regeneration evidence", () => {
+  it("uses only whitelisted project records and ledger, excluding the prior AI draft entirely", async () => {
+    mocks.generateJSON.mockResolvedValueOnce({
+      title: "New draft report",
+      summary: "Recorded project information",
+      evidence_gaps: [],
+    });
+    const result = await call({ action: "report", projectId: project.id });
+    expect(result.status).toBe(200);
+    expect(mocks.generateJSON).toHaveBeenCalledTimes(1);
+    const prompt = mocks.generateJSON.mock.calls[0][0] as string;
+    expect(prompt).toContain("User recorded workshops");
+    expect(prompt).toContain("Recorded supplies");
+    expect(prompt).toContain("unverified source data");
+    expect(prompt).not.toContain("UNSUPPORTED-PRIOR-AI-SENTINEL");
+    expect(prompt).not.toContain("report_draft");
+    expect(prompt).not.toContain("UNLISTED-PROJECT-FIELD");
+    expect(writes).toEqual([
+      expect.objectContaining({
+        report_draft: expect.objectContaining({
+          title: "New draft report",
+          human_review_required: true,
+        }),
+      }),
+    ]);
   });
 });
