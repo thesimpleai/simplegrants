@@ -1,0 +1,66 @@
+# Simple Grant
+
+**A little less paperwork. A lot more possibility.**
+
+An Australian grant workspace for community organisations: one login, multiple organisations, private documents, AI-assisted applications and a clear view of funded projects.
+
+![Simple Grant demo workspace](docs/screenshots/overview.png)
+
+## Try the interface
+
+```sh
+npm ci
+npm run dev
+```
+
+Without Supabase settings, the portal opens an explicitly labelled fictional demo. Demo changes are kept in memory only; AI, uploads and email do not pretend to be connected. Do not copy placeholder settings into `.env` to run the demo.
+
+## Implemented
+
+- Email-link sign-in with Supabase Auth and several organisations under one account.
+- Private, organisation-scoped document storage with database and storage row-level security.
+- Organisation onboarding with three Gemini passes: extract, check against originals, correct, then human approval.
+- Google Search-grounded discovery, user-supplied opportunity imports and saved opportunities. Eligibility remains for review; the application does not invent match scores.
+- Applications gated by approved organisation facts, current guidelines, actual application questions, project information and required evidence. Editable drafts, downloads, status tracking and funder submission references.
+- Award-to-project transition, original proposal, budget, milestones, expenses, evidence links and persisted AI report drafts.
+- Signed, idempotent Resend inbound processing and a review inbox. **Attachment metadata is retained; actual forwarded files must currently be uploaded in the portal.**
+- Optional public-only email assistance. Gemini selects an intent, then the server builds a fixed answer from name/ABN or source-backed saved grant information. Private questions go to the authenticated portal.
+- Weekly/monthly/never grant-summary preferences with protected deep links, using a bounded hourly pilot worker.
+- Responsive screens and keyboard-accessible dialogs.
+
+This is a deployable first version, not a completed public-launch service. It does not submit applications, audit finances, certify eligibility, provide full conversational email support, ingest original email attachments or replace accounting software. Team invitations, malware scanning, a scalable background job queue and broader grant-source integrations are next-stage work.
+
+## Deploy and connect your services
+
+Read **[Deployment instructions](docs/DEPLOYMENT.md)** for Netlify settings, all environment variables, Supabase migrations, email DNS, webhooks and live validation.
+
+The frontend uses React, TypeScript and Vite. Netlify Functions hold the Gemini and Resend keys. Supabase supplies Auth, Postgres and private Storage. Use Node 22 or later.
+
+For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
+
+You can connect Supabase without sharing account access: create a project, apply every file in `supabase/migrations/` in filename order, then put the project URL and appropriate public/server keys directly in Netlify. If the assistant should apply migrations later, authenticate its CLI through secure environment settings rather than pasting a token into chat.
+
+The brief mentions both `thesimpleai.com` and `simpleai.com.au`. The domain is configurable. Choose an owned, verified domain; using a dedicated receiving subdomain avoids replacing an existing staff mailbox’s MX records.
+
+## Australian grant requirements
+
+The key rule is **follow each opportunity’s current guidelines and grant agreement**, rather than requiring the same documents from every organisation. Financial statements, audits, insurance, DGR status and auspicing are conditional requirements. A draft is not a lodged application; a recorded expense is not an audited financial acquittal.
+
+- [Australian grants research and primary-source references](docs/AUSTRALIAN_GRANTS_RESEARCH.md)
+- [Product scope, launch priorities and roadmap](docs/PRODUCT_ROADMAP.md)
+- [Database and access-control design](docs/SCHEMA.md)
+
+Official Australian source pages were blocked by the development environment’s network policy during initial research. The research document explicitly distinguishes background guidance and unverified source links from current verified rules. Recheck those primary sources and the actual funder documents before launch.
+
+## Validation
+
+```sh
+npm test                 # backend evidence/security and draft rendering
+npm run build            # TypeScript plus production frontend
+npm run test:browser     # Chromium workflows; install Playwright Chromium if needed
+npm run test:db          # disposable Docker/Postgres SQL and tenant-isolation tests
+```
+
+The SQL harness uses test-only Auth/Storage stubs in an isolated container. Never install those stubs in a real Supabase project. Passing local tests does not establish that live Supabase, Gemini, Resend DNS/webhooks or Netlify schedules work; follow the staging checklist with real service settings.
+
+Cloud tasks already have isolated checkouts. Use `/workspace/simplegrants` directly; no additional Git worktree is needed.
