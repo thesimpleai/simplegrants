@@ -31,13 +31,13 @@ An actual project sign-in and Storage API upload/download check is still require
 
 No hosted installer or project settings have been applied by these local checks. The live project has not been linked or verified, and no live credentials have been tested.
 
-## App-specific Resend login update
+## App-specific Resend login with CAPTCHA (historical, before simplification)
 
-The current login flow keeps shared Supabase identities while sending a Simple Grants email through a server-only Resend route. It adds a dedicated `/auth/confirm` return page, hostname/action-checked Turnstile, durable HMAC email/IP quotas, generic account acknowledgements and app/project-specific browser storage with local-only logout. The callback clears the token fragment before the user explicitly confirms sign-in. Native URL session detection is disabled, so legacy implicit/PKCE links require a fresh application-specific email after rollout. There is no fallback to the shared project's email templates when security/provider configuration is absent.
+This earlier staged login flow kept shared Supabase identities while sending a Simple Grants email through a server-only Resend route. It adds a dedicated `/auth/confirm` return page, hostname/action-checked Turnstile, durable HMAC email/IP quotas, generic account acknowledgements and app/project-specific browser storage with local-only logout. The callback clears the token fragment before the user explicitly confirms sign-in. Native URL session detection is disabled, so legacy implicit/PKCE links require a fresh application-specific email after rollout. There is no fallback to the shared project's email templates when security/provider configuration is absent.
 
 Existing 001–004 installations use only `202611100005_auth_email.sql`; fresh installations use the five-migration combined installer. No global SMTP, Site URL, email-template, signup-setting or unrelated-redirect change is part of this update. `AUTH_ALLOW_SIGNUPS=false` restricts delivery to existing shared accounts unless onboarding is explicitly enabled.
 
-This change is staged for `fix/simple-grants-auth`; production rollout waits for migration 005, the six new settings, Resend sender verification and Turnstile. Default preview origins are deliberately rejected by the canonical-origin check. Validated locally on 11 November 2026:
+This historical version required six new settings and Turnstile. Those requirements and the results below precede the current simplification; they do not validate the revised flow. Default preview origins are deliberately rejected by the canonical-origin check. Validated locally on 11 November 2026:
 
 - `npm test`: **77 tests passed across eight files**, including branded-email request guards, generic account acknowledgements, fixed application-origin links, provider failure handling, auth-session isolation and same-origin return paths. Provider calls are mocked; no real email was sent.
 - `npm run build`: TypeScript and the production build passed.
@@ -47,9 +47,22 @@ This change is staged for `fix/simple-grants-auth`; production rollout waits for
 
 These are local code/database checks, not hosted provider delivery or account-setting verification. A mocked email/API test is not proof that the sending domain is verified or that a real login email/callback works. No real login email has been sent by these local checks.
 
+## Simplified app-specific login (current)
+
+The staged `fix/simple-grants-auth` flow now uses only the existing Supabase, Resend and Netlify services, with four new server settings. It removes the CAPTCHA dependency while retaining mandatory migration 005, HMAC email/IP quotas, exact canonical-Origin checks, Netlify-provided request IP, an optional honeypot, generic acknowledgements, app-local logout and explicit confirmation of the private token fragment. Other applications' global Auth settings remain unchanged.
+
+The SQL limits are unchanged: sixty-second email cooldown, five claimed requests per email per hour and twenty per IP per hour. Automated clients can spoof Origin, omit the honeypot and distribute requests across IPs. Existing-user-only delivery is the default; enabling public signups increases abuse exposure. These controls do not establish comprehensive bot prevention.
+
+Production rollout waits for migration 005, the four login settings and Resend sender verification/DNS. The previous **77 unit / 17 browser** results describe the superseded CAPTCHA version. The simplified version was validated locally on 11 November 2026:
+
+- `npm test`: **78 tests passed across eight files**, including plain email-only requests with no CAPTCHA environment settings or external verification calls, honeypot suppression, mandatory quota failure handling, token/session boundaries and provider-error acknowledgements.
+- `npm run build`: TypeScript and the production frontend build passed.
+- `npm run test:browser`: **17 workflows passed**, including immediate email-form use, duplicate submission prevention, failed-request retry, hidden-field propagation, no Cloudflare assets or native Supabase OTP requests, explicit confirmation and unsolicited URL-token rejection.
+- `npm run db:check`: the generated installer still matches its canonical sources. Migration 005 and its previously tested SQL rate limits/concurrency logic did not change in this simplification. No real login email or provider/account settings have been changed by these local checks.
+
 ## Not yet validated
 
-At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification, Turnstile widget or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.
+At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.
 
 Official Australian government research pages were blocked by the cloud network policy. The research document marks its primary-source links and current-law verification status accordingly. Do not treat its background thresholds as a live legal determination.
 

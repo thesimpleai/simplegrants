@@ -9,7 +9,6 @@ import {
   authEmailSender,
   authRateSecret,
   trustedAuthIp,
-  verifyAuthCaptcha,
   authRateHash,
   authEmailContent,
   AUTH_EMAIL_ACCEPTED,
@@ -18,7 +17,7 @@ import {
 const bodySchema = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
   next: z.string().max(2048).optional(),
-  captchaToken: z.string().min(1).max(4096),
+  website: z.string().max(300).default(""),
 });
 const accepted = () =>
   json({ accepted: true, message: AUTH_EMAIL_ACCEPTED }, 202);
@@ -49,16 +48,13 @@ export default async (request: Request, context: Pick<Context, "ip">) => {
     try {
       value = JSON.parse(raw);
     } catch {
-      throw new HttpError(
-        400,
-        "Enter your email and complete the security check.",
-      );
+      throw new HttpError(400, "Enter your email to request a sign-in link.");
     }
     const parsed = bodySchema.safeParse(value);
     if (!parsed.success)
       throw new HttpError(
         400,
-        "Enter a valid email and complete the security check.",
+        "Enter a valid email to request a sign-in link.",
       );
     const email = parsed.data.email.trim().toLowerCase();
     const next = safeAuthReturnPath(parsed.data.next);
@@ -67,9 +63,9 @@ export default async (request: Request, context: Pick<Context, "ip">) => {
     const rateSecret = authRateSecret();
     const sender = authEmailSender();
     const resendKey = env("RESEND_API_KEY");
-    env("AUTH_TURNSTILE_SECRET_KEY");
+    // A quiet honeypot catches some automated form fills; durable quotas remain mandatory.
+    if (parsed.data.website.trim()) return accepted();
     const db = serviceDb();
-    await verifyAuthCaptcha(parsed.data.captchaToken, ip, origin);
     const claim = await db.rpc("claim_auth_email", {
       p_email_hash: authRateHash(rateSecret, "email", email),
       p_ip_hash: authRateHash(rateSecret, "ip", ip),

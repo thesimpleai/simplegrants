@@ -2,11 +2,11 @@
 
 Simple Grant should help a small Australian organisation move from finding an opportunity to producing its final report. Its first release is an assisted workspace. An authorised person remains responsible for factual approval, grant declarations, submission and reporting.
 
-See `AUSTRALIAN_GRANTS_RESEARCH.md` for the Australian requirements and source links, and `DEPLOYMENT.md` for the live service configuration. The presence of integration code does not mean provider accounts, DNS or production credentials have been configured. For a fresh shared-project installation, apply the reviewed five-migration installer and append the exposed schema; existing 001–004 installations apply migration 005 only. App-specific Resend login uses its own callback and Turnstile without changing project-wide Auth settings or redirect lists. See `AUTHENTICATION.md`. Legacy public-schema Simple Grant data requires a separate reviewed migration; it is not moved automatically.
+See `AUSTRALIAN_GRANTS_RESEARCH.md` for the Australian requirements and source links, and `DEPLOYMENT.md` for the live service configuration. The presence of integration code does not mean provider accounts, DNS or production credentials have been configured. For a fresh shared-project installation, apply the reviewed five-migration installer and append the exposed schema; existing 001–004 installations apply migration 005 only. App-specific Resend login uses its own callback and durable email/IP limits without changing project-wide Auth settings or redirect lists. See `AUTHENTICATION.md`. Legacy public-schema Simple Grant data requires a separate reviewed migration; it is not moved automatically.
 
 ## First-release scope
 
-- Simple Grants-branded Resend sign-in with Turnstile, durable limits, a dedicated callback and local-only logout. Auth identities remain in the shared Supabase pool.
+- Simple Grants-branded Resend sign-in with durable email/IP limits, a dedicated callback and local-only logout. Auth identities remain in the shared Supabase pool.
 - A single login with several organisation workspaces, private documents, and membership-based database access. Shared Supabase projects use a dedicated `simple_grant` schema and `simple-grant-documents` bucket without changing other applications' public tables or migration history.
 - Organisation setup from supplied documents and pasted history, with extraction, source checking and correction before human approval.
 - Separate places for available opportunities, applications in preparation, and funded projects.

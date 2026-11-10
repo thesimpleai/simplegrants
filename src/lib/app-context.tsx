@@ -503,27 +503,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }));
     notify("Message updated.");
   }
-  async function signIn(email: string, captchaToken?: string) {
+  async function signIn(email: string, website = "") {
     if (!supabase)
       throw new Error("Sign-in is unavailable in the demo workspace.");
-    if (!captchaToken)
-      throw new Error("Please complete the security check and try again.");
     const response = await fetch("/api/auth-email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         email: email.trim(),
-        captchaToken,
+        website,
         next: safeAuthReturnPath(
           window.location.pathname + window.location.search,
         ),
       }),
     });
-    const body = await response
-      .json()
-      .catch(() => ({
-        error: "Sign-in is temporarily unavailable. Please try again shortly.",
-      }));
+    const body = await response.json().catch(() => ({
+      error: "Sign-in is temporarily unavailable. Please try again shortly.",
+    }));
     if (!response.ok)
       throw new Error(
         typeof body.error === "string"

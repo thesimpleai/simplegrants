@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
-import Turnstile from "./components/Turnstile";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Bell,
@@ -56,14 +55,8 @@ export default function App() {
     [error, setError] = useState(""),
     [email, setEmail] = useState(""),
     [emailSent, setEmailSent] = useState(false),
-    [captchaToken, setCaptchaToken] = useState<string | null>(null),
-    [captchaReset, setCaptchaReset] = useState(0),
+    [website, setWebsite] = useState(""),
     [search, setSearch] = useState("");
-  const onCaptchaToken = useCallback(
-    (token: string | null) => setCaptchaToken(token),
-    [],
-  );
-  const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "";
   function navigate(target: string) {
     const parts = target.split("&");
     setPage(parts[0]);
@@ -98,14 +91,13 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      await app.signIn(email, captchaToken ?? undefined);
+      await app.signIn(email, website);
       setEmailSent(true);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setBusy(false);
-      setCaptchaToken(null);
-      setCaptchaReset((value) => value + 1);
+      setWebsite("");
     }
   }
   if (app.configured && !app.user)
@@ -160,16 +152,20 @@ export default function App() {
                 onChange={(e) => setEmail(e.target.value)}
               />
             </label>
-            <Turnstile
-              siteKey={turnstileSiteKey}
-              onToken={onCaptchaToken}
-              resetKey={captchaReset}
-              disabled={busy}
-            />
-            <button
-              className="button primary"
-              disabled={busy || !captchaToken || !turnstileSiteKey}
-            >
+            <div className="auth-honeypot" aria-hidden="true">
+              <label>
+                Leave this field empty
+                <input
+                  type="text"
+                  name="website"
+                  autoComplete="off"
+                  tabIndex={-1}
+                  value={website}
+                  onChange={(e) => setWebsite(e.target.value)}
+                />
+              </label>
+            </div>
+            <button className="button primary" disabled={busy}>
               {busy ? (
                 <Busy label="Sending your link…" />
               ) : (

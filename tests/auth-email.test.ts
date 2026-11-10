@@ -24,10 +24,9 @@ const tokenHash =
   "64a6ffef3259512b383ac34e91dedc6ae3a1d36b4e1763df08ba259812ff8891";
 const secret =
   "2d8646cfa93ef187c255e62184ab7f76c7d12e867cad427db9ba1fe59a48b102";
-let captcha: Record<string, unknown>;
 let fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
 function request(
-  body: unknown = { email: "member@example.com", captchaToken: "widget-token" },
+  body: unknown = { email: "member@example.com" },
   headers: Record<string, string> = {},
   method = "POST",
 ) {
@@ -62,20 +61,11 @@ beforeEach(() => {
   vi.stubEnv("AUTH_APP_URL", origin);
   vi.stubEnv("AUTH_EMAIL_FROM", "Simple Grants <login@simplegrants.com.au>");
   vi.stubEnv("AUTH_RATE_LIMIT_SECRET", secret);
-  vi.stubEnv("AUTH_TURNSTILE_SECRET_KEY", "test-private-turnstile-key");
   vi.stubEnv("AUTH_ALLOW_SIGNUPS", "false");
   vi.stubEnv("RESEND_API_KEY", "test-private-resend-key");
-  captcha = {
-    success: true,
-    hostname: "simplegrants.com.au",
-    action: "simple-grants-sign-in",
-  };
-  fetchMock = vi.fn<typeof fetch>(
-    async () =>
-      new Response(JSON.stringify(captcha), {
-        headers: { "Content-Type": "application/json" },
-      }),
-  );
+  fetchMock = vi.fn<typeof fetch>(async () => {
+    throw new Error("Unexpected external request in sign-in test");
+  });
   vi.stubGlobal("fetch", fetchMock);
   mocks.rpc.mockImplementation(async (name: string) => ({
     data: name === "claim_auth_email" ? claimId : true,
@@ -121,22 +111,25 @@ describe("public auth email request boundaries", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     noDelivery();
   });
-  it("rejects oversized UTF-8 bodies, malformed JSON, invalid email and missing CAPTCHA", async () => {
+  it("rejects oversized UTF-8 bodies, malformed JSON, invalid email and invalid honeypot input", async () => {
     expect(
       (
         await call({
           email: "member@example.com",
-          captchaToken: "widget-token",
           junk: "🎉".repeat(5000),
         })
       ).status,
     ).toBe(413);
     expect((await call("{not-json")).status).toBe(400);
+    expect((await call({ email: "not-an-email" })).status).toBe(400);
+    expect((await call({})).status).toBe(400);
     expect(
-      (await call({ email: "not-an-email", captchaToken: "widget-token" }))
+      (await call({ email: "member@example.com", website: 123 })).status,
+    ).toBe(400);
+    expect(
+      (await call({ email: "member@example.com", website: "x".repeat(301) }))
         .status,
     ).toBe(400);
-    expect((await call({ email: "member@example.com" })).status).toBe(400);
     expect(
       (await call(undefined, { "Content-Type": "text/plain" })).status,
     ).toBe(415);
@@ -176,54 +169,59 @@ describe("public auth email request boundaries", () => {
   it("fails closed until the provider keys are configured", async () => {
     vi.stubEnv("RESEND_API_KEY", "");
     expect((await call()).status).toBe(503);
-    vi.stubEnv("RESEND_API_KEY", "test-key");
-    vi.stubEnv("AUTH_TURNSTILE_SECRET_KEY", "");
-    expect((await call()).status).toBe(503);
     noDelivery();
   });
 });
 
-describe("Turnstile and durable anti-abuse checks", () => {
-  it.each([
-    { success: false },
-    {
-      success: true,
-      hostname: "other-app.example",
-      action: "simple-grants-sign-in",
-    },
-    { success: true, hostname: "simplegrants.com.au", action: "other-action" },
-  ])(
-    "rejects invalid CAPTCHA result before quota/user lookup: %j",
-    async (result) => {
-      captcha = result;
-      expect((await call()).status).toBe(400);
-      expect(mocks.rpc).not.toHaveBeenCalled();
-      noDelivery();
-    },
-  );
-  it("validates with the fixed official endpoint, trusted IP and short timeout", async () => {
-    await call();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0];
-    expect(url).toBe(
-      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-    );
-    expect(options?.method).toBe("POST");
-    expect(options?.signal).toBeInstanceOf(AbortSignal);
-    const values = options?.body as URLSearchParams;
-    expect(values.get("remoteip")).toBe(ip);
-    expect(values.get("response")).toBe("widget-token");
+describe("durable anti-abuse checks without external CAPTCHA", () => {
+  it("accepts a plain email-only request and sends the app-specific link without a challenge or verification fetch", async () => {
+    const response = await call({ email: "member@example.com" });
+    expect(response.status).toBe(202);
+    expect(mocks.generateLink).toHaveBeenCalledTimes(1);
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
-  it("does not weaken CAPTCHA when validation is unavailable", async () => {
-    fetchMock.mockRejectedValueOnce(new Error("network unavailable"));
-    expect((await call()).status).toBe(503);
+  it("quietly accepts a filled honeypot without database, auth or mail provider access", async () => {
+    const response = await call({
+      email: "member@example.com",
+      website: "https://automated-form.example",
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      accepted: true,
+      message: AUTH_EMAIL_ACCEPTED,
+    });
+    expect(mocks.serviceDb).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
     noDelivery();
   });
+  it.each(["claim-error", "claim-throws", "invalid-claim", "lookup-error"])(
+    "fails closed without sending when durable auth control is unavailable: %s",
+    async (failure) => {
+      if (failure === "claim-error")
+        mocks.rpc.mockResolvedValueOnce({
+          data: null,
+          error: { message: "RPC missing" },
+        });
+      if (failure === "claim-throws")
+        mocks.rpc.mockRejectedValueOnce(new Error("Database unavailable"));
+      if (failure === "invalid-claim")
+        mocks.rpc.mockResolvedValueOnce({ data: true, error: null });
+      if (failure === "lookup-error")
+        mocks.rpc.mockImplementation(async (name: string) =>
+          name === "claim_auth_email"
+            ? { data: claimId, error: null }
+            : { data: null, error: { message: "Lookup unavailable" } },
+        );
+      expect((await call()).status).toBe(503);
+      noDelivery();
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
   it("stores domain-separated HMACs rather than email or IP and claims before lookup", async () => {
     await call({
       email: "  MEMBER@EXAMPLE.COM  ",
-      captchaToken: "widget-token",
     });
     expect(mocks.rpc.mock.calls[0]).toEqual([
       "claim_auth_email",
@@ -278,7 +276,6 @@ describe("app-specific sign-in email", () => {
       "/?view=opportunities&org=6a03978d-6266-46b6-b35e-bf8069e50743&grant=6a03978d-6266-46b6-b35e-bf8069e50744";
     const response = await call({
       email: "member@example.com",
-      captchaToken: "widget-token",
       next,
     });
     expect(response.status).toBe(202);
@@ -304,7 +301,6 @@ describe("app-specific sign-in email", () => {
   it("never accepts an arbitrary external return URL", async () => {
     await call({
       email: "member@example.com",
-      captchaToken: "widget-token",
       next: "https://other-application.example",
     });
     const link = new URL(

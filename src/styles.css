@@ -3005,3 +3005,15 @@ td:last-child {
     font-size: 16px;
   }
 }
+
+/* Spam trap: excluded from the visible and keyboard-accessible sign-in form. */
+.auth-honeypot {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  pointer-events: none;
+}

@@ -1,9 +1,8 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
 import { env, escapeHtml, HttpError } from "./core";
 
-export const AUTH_TURNSTILE_ACTION = "simple-grants-sign-in";
 export const AUTH_EMAIL_ACCEPTED =
   "If this address can sign in, we’ll email a secure Simple Grants link. Check your inbox and spam folder.";
 
@@ -83,65 +82,6 @@ export function trustedAuthIp(ip: string | undefined): string {
       "The sign-in request could not be verified. Please try again from the Simple Grants website.",
     );
   return ip.toLowerCase();
-}
-
-export async function verifyAuthCaptcha(
-  token: string,
-  ip: string,
-  origin: string,
-): Promise<void> {
-  const secret = env("AUTH_TURNSTILE_SECRET_KEY");
-  const payload = new URLSearchParams({
-    secret,
-    response: token,
-    remoteip: ip,
-    idempotency_key: randomUUID(),
-  });
-  let response: Response;
-  try {
-    response = await fetch(
-      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: payload,
-        signal: AbortSignal.timeout(8000),
-      },
-    );
-  } catch {
-    throw new HttpError(
-      503,
-      "The sign-in security check is temporarily unavailable. Please try again.",
-    );
-  }
-  if (!response.ok)
-    throw new HttpError(
-      503,
-      "The sign-in security check is temporarily unavailable. Please try again.",
-    );
-  const schema = z.object({
-    success: z.boolean(),
-    hostname: z.string().optional(),
-    action: z.string().optional(),
-  });
-  let result: z.infer<typeof schema>;
-  try {
-    result = schema.parse(await response.json());
-  } catch {
-    throw new HttpError(
-      503,
-      "The sign-in security check could not be completed. Please try again.",
-    );
-  }
-  if (
-    !result.success ||
-    result.hostname?.toLowerCase() !== new URL(origin).hostname ||
-    result.action !== AUTH_TURNSTILE_ACTION
-  )
-    throw new HttpError(
-      400,
-      "Please complete the Simple Grants security check and try again.",
-    );
 }
 
 export function authEmailContent(link: string) {
