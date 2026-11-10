@@ -665,26 +665,72 @@ export function AppProvider({ children }: { children: ReactNode }) {
   async function signIn(email: string, website = "") {
     if (!supabase)
       throw new Error("Sign-in is unavailable in the demo workspace.");
-    const response = await fetch("/api/auth-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: email.trim(),
-        website,
-        next: safeAuthReturnPath(
-          window.location.pathname + window.location.search,
-        ),
-      }),
-    });
-    const body = await response.json().catch(() => ({
-      error: "Sign-in is temporarily unavailable. Please try again shortly.",
-    }));
-    if (!response.ok)
-      throw new Error(
-        typeof body.error === "string"
-          ? body.error
-          : "Your sign-in email could not be requested. Please try again shortly.",
+    const responseFailure = () =>
+      new Error(
+        "Sign-in is temporarily unavailable. Please try again. Reference: SG_AUTH_RESPONSE.",
       );
+    let response: Response;
+    try {
+      response = await fetch("/api/auth-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          website,
+          next: safeAuthReturnPath(
+            window.location.pathname + window.location.search,
+          ),
+        }),
+      });
+    } catch {
+      throw new Error(
+        "We couldn’t connect to sign-in. Check your internet connection and try again. Reference: SG_AUTH_NETWORK.",
+      );
+    }
+    if (
+      response.headers
+        .get("content-type")
+        ?.split(";")[0]
+        .trim()
+        .toLowerCase() !== "application/json"
+    )
+      throw responseFailure();
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw responseFailure();
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload))
+      throw responseFailure();
+    const body = payload as Record<string, unknown>;
+    if (response.status === 503) {
+      const safeCodes = new Set([
+        "SG_AUTH_SCHEMA",
+        "SG_AUTH_RPC",
+        "SG_AUTH_ACCESS",
+        "SG_AUTH_DATABASE",
+        "SG_AUTH_SETUP",
+      ]);
+      if (
+        typeof body.code === "string" &&
+        safeCodes.has(body.code) &&
+        typeof body.reference === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          body.reference,
+        )
+      ) {
+        // Rebuild the known public message; never render upstream payloads or HTML.
+        throw new Error(
+          `Simple Grants sign-in is temporarily unavailable. Please try again. Reference: ${body.reference} (${body.code}).`,
+        );
+      }
+      throw responseFailure();
+    }
+    // A Netlify SPA fallback can return a successful HTTP 200 with HTML. Only
+    // the explicit API acknowledgement can be treated as an email request.
+    if (response.status !== 202 || body.accepted !== true)
+      throw responseFailure();
     notify(
       "If this address can sign in, a Simple Grants email will arrive shortly.",
     );

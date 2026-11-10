@@ -12,6 +12,8 @@ import {
   authRateHash,
   authEmailContent,
   AUTH_EMAIL_ACCEPTED,
+  authUnavailable,
+  type AuthFailureStage,
 } from "./lib/auth-email";
 
 const bodySchema = z.object({
@@ -23,10 +25,12 @@ const accepted = () =>
   json({ accepted: true, message: AUTH_EMAIL_ACCEPTED }, 202);
 
 export default async (request: Request, context: Pick<Context, "ip">) => {
+  let stage: AuthFailureStage = "origin_setup";
   try {
     if (request.method !== "POST")
       return json({ error: "Use POST for Simple Grants sign-in." }, 405);
     const origin = authAppOrigin();
+    stage = "request_validation";
     if (request.headers.get("origin") !== origin)
       throw new HttpError(
         403,
@@ -58,39 +62,39 @@ export default async (request: Request, context: Pick<Context, "ip">) => {
       );
     const email = parsed.data.email.trim().toLowerCase();
     const next = safeAuthReturnPath(parsed.data.next);
+    stage = "client_ip";
     const ip = trustedAuthIp(context?.ip);
     // Fail closed on missing setup. Never fall back to shared-project auth email.
+    stage = "auth_config";
     const rateSecret = authRateSecret();
     const sender = authEmailSender();
     const resendKey = env("RESEND_API_KEY");
     // A quiet honeypot catches some automated form fills; durable quotas remain mandatory.
     if (parsed.data.website.trim()) return accepted();
+    stage = "database_client";
     const db = serviceDb();
+    stage = "rate_claim";
     const claim = await db.rpc("claim_auth_email", {
       p_email_hash: authRateHash(rateSecret, "email", email),
       p_ip_hash: authRateHash(rateSecret, "ip", ip),
     });
-    if (claim.error)
-      throw new HttpError(
-        503,
-        "Simple Grants sign-in is temporarily unavailable. Please try again.",
-      );
+    if (claim.error) return authUnavailable(stage, claim.error, claim.status);
     if (!claim.data) return accepted();
+    stage = "rate_claim_result";
     const requestId = z.uuid().safeParse(claim.data);
     if (!requestId.success)
-      throw new HttpError(
-        503,
-        "Simple Grants sign-in is temporarily unavailable. Please try again.",
-      );
+      return authUnavailable(stage, { code: "INVALID_RESPONSE" });
     if (process.env.AUTH_ALLOW_SIGNUPS !== "true") {
+      stage = "eligibility_lookup";
       const existing = await db.rpc("auth_email_user_exists", {
         p_email: email,
       });
       if (existing.error)
-        throw new HttpError(
-          503,
-          "Simple Grants sign-in is temporarily unavailable. Please try again.",
-        );
+        return authUnavailable(stage, existing.error, existing.status);
+      if (typeof existing.data !== "boolean")
+        return authUnavailable("eligibility_result", {
+          code: "INVALID_RESPONSE",
+        });
       if (existing.data !== true) return accepted();
     }
     // Every outcome after account eligibility has the same public response.
@@ -131,16 +135,11 @@ export default async (request: Request, context: Pick<Context, "ip">) => {
     }
     return accepted();
   } catch (error) {
-    if (error instanceof HttpError)
+    if (error instanceof HttpError) {
+      if (error.status === 503)
+        return authUnavailable(stage, undefined, undefined, error.message);
       return json({ error: error.message }, error.status);
-    // Auth provider payloads may contain bearer tokens or email addresses. Never log them.
-    console.error("Simple Grants sign-in request could not be completed.");
-    return json(
-      {
-        error:
-          "Simple Grants sign-in is temporarily unavailable. Please try again.",
-      },
-      503,
-    );
+    }
+    return authUnavailable(stage, error);
   }
 };

@@ -85,6 +85,18 @@ Live HTTP requests were blocked at the task's proxy with **CONNECT 403**; browse
 
 The current release uses only Supabase, Resend and Netlify for login, with four server auth settings and no additional provider. The SQL 005 limits and shared-Auth boundaries remain as documented in `AUTHENTICATION.md`. Hosted checks remain blocked until task connectivity is restored. The completed setup should not be repeated merely because this executor could not reach the site.
 
+## Login failure diagnostics update (11 November 2026)
+
+A reported hosted sign-in failure displayed the existing generic unavailable message. This identifies a pre-delivery server failure, but its hosted cause has not been established. The update adds safe diagnostic references for setup, schema, RPC, access and database failures. Logs retain only fixed stages, allowlisted error categories and random references; account-dependent outcomes still return identical acknowledgements. The browser requires HTTP 202 JSON with `accepted: true`, preventing an HTML fallback from appearing to send an email.
+
+- `npm test`: **100 of 100 tests passed across nine files**, including privacy canaries, thrown/malformed database responses and unchanged account/provider acknowledgements.
+- `npm run build`: TypeScript and the production build passed.
+- The focused email sign-in browser suite passed **12 of 12 cases**, including safe references, invalid/HTML responses and network retry. The other browser workflows were not rerun for this update; their earlier 22-case result belongs to the comprehensive check above.
+- The auth Function bundled for Node 22; its packaged GET guard and missing-configuration diagnostic passed without provider calls.
+- The read-only SQL diagnostic passed **nine disposable PostgreSQL scenarios**, covering missing and installed objects, incorrect permissions/RLS and inconclusive API exposure. It does not execute login RPCs or read user records.
+
+These results validate the diagnostic changes, not a repair to the hosted configuration. Production verification awaits the actual SQL result or a safe deployed error reference; no provider credentials or live email were used.
+
 ## Not yet validated
 
 At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.

@@ -379,3 +379,241 @@ describe("app-specific sign-in email", () => {
     expect(JSON.stringify(await sendFailure.json())).not.toContain(tokenHash);
   });
 });
+
+describe("privacy-safe infrastructure diagnostics", () => {
+  const canary =
+    "PRIVATE-CANARY-email@example.com-203.0.113.250-bearer-token-and-api-key";
+  it.each([
+    {
+      upstream: "PGRST106",
+      status: 406,
+      expected: "SG_AUTH_SCHEMA",
+      logged: "PGRST106",
+    },
+    {
+      upstream: "PGRST202",
+      status: 404,
+      expected: "SG_AUTH_RPC",
+      logged: "PGRST202",
+    },
+    {
+      upstream: "42P01",
+      status: 400,
+      expected: "SG_AUTH_RPC",
+      logged: "42P01",
+    },
+    {
+      upstream: "42501",
+      status: 403,
+      expected: "SG_AUTH_ACCESS",
+      logged: "42501",
+    },
+    {
+      upstream: "PGRST301",
+      status: 401,
+      expected: "SG_AUTH_ACCESS",
+      logged: "PGRST301",
+    },
+    {
+      upstream: "",
+      status: 401,
+      expected: "SG_AUTH_ACCESS",
+      logged: "HTTP_401",
+    },
+    {
+      upstream: "25001",
+      status: 400,
+      expected: "SG_AUTH_DATABASE",
+      logged: "25001",
+    },
+    {
+      upstream: "",
+      status: 0,
+      expected: "SG_AUTH_DATABASE",
+      logged: "NETWORK",
+    },
+    {
+      upstream: canary,
+      status: undefined,
+      expected: "SG_AUTH_DATABASE",
+      logged: "OTHER",
+    },
+  ])(
+    "classifies pre-send rate RPC failure $upstream without exposing its payload",
+    async ({ upstream, status, expected, logged }) => {
+      mocks.rpc.mockResolvedValueOnce({
+        data: null,
+        error: {
+          code: upstream,
+          message: canary,
+          details: { body: canary },
+          hint: canary,
+        },
+        status,
+      });
+      const response = await call();
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.code).toBe(expected);
+      expect(body.reference).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(body.error).toContain(body.reference);
+      expect(body.error).toContain(expected);
+      expect(JSON.stringify(body)).not.toContain(canary);
+      expect(console.error).toHaveBeenCalledWith(
+        "Simple Grants authentication unavailable",
+        {
+          stage: "rate_claim",
+          databaseCode: logged,
+          code: expected,
+          reference: body.reference,
+        },
+      );
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+        canary,
+      );
+      expect(mocks.rpc).toHaveBeenCalledTimes(1);
+      noDelivery();
+    },
+  );
+  it("correlates a thrown network failure with a safe stage and allowlisted code", async () => {
+    mocks.rpc.mockRejectedValueOnce(
+      Object.assign(new Error(canary), {
+        code: "ENOTFOUND",
+        cause: { message: canary },
+      }),
+    );
+    const response = await call();
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expect(body.code).toBe("SG_AUTH_DATABASE");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "rate_claim",
+        databaseCode: "ENOTFOUND",
+        reference: body.reference,
+      }),
+    );
+    expect(JSON.stringify(body)).not.toContain(canary);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      canary,
+    );
+    noDelivery();
+  });
+  it("reports malformed claim data without logging or returning that data", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: canary, error: null });
+    const response = await call();
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expect(body.code).toBe("SG_AUTH_DATABASE");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "rate_claim_result",
+        databaseCode: "INVALID_RESPONSE",
+        reference: body.reference,
+      }),
+    );
+    expect(JSON.stringify(body)).not.toContain(canary);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      canary,
+    );
+    noDelivery();
+  });
+  it("identifies eligibility RPC errors without disclosing the queried email or raw error", async () => {
+    mocks.rpc.mockImplementation(async (name: string) =>
+      name === "claim_auth_email"
+        ? { data: claimId, error: null }
+        : {
+            data: null,
+            error: { code: "42501", message: canary, details: canary },
+            status: 403,
+          },
+    );
+    const response = await call();
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expect(body.code).toBe("SG_AUTH_ACCESS");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "eligibility_lookup",
+        databaseCode: "42501",
+        reference: body.reference,
+      }),
+    );
+    const logs = JSON.stringify(vi.mocked(console.error).mock.calls);
+    expect(logs).not.toContain(canary);
+    expect(logs).not.toContain("member@example.com");
+    expect(logs).not.toContain(ip);
+    noDelivery();
+  });
+  it("fails safely for a thrown eligibility lookup or invalid boolean result", async () => {
+    mocks.rpc.mockImplementation(async (name: string) => {
+      if (name === "claim_auth_email") return { data: claimId, error: null };
+      throw Object.assign(new Error(canary), { code: "PGRST202" });
+    });
+    const thrown = await call();
+    const thrownBody = await thrown.json();
+    expect(thrown.status).toBe(503);
+    expect(thrownBody.code).toBe("SG_AUTH_RPC");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "eligibility_lookup",
+        databaseCode: "PGRST202",
+      }),
+    );
+    mocks.rpc.mockImplementation(async (name: string) => ({
+      data: name === "claim_auth_email" ? claimId : canary,
+      error: null,
+    }));
+    const invalid = await call();
+    const invalidBody = await invalid.json();
+    expect(invalid.status).toBe(503);
+    expect(invalidBody.code).toBe("SG_AUTH_DATABASE");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "eligibility_result",
+        databaseCode: "INVALID_RESPONSE",
+      }),
+    );
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      canary,
+    );
+    noDelivery();
+  });
+  it("adds a setup reference for missing configuration or a failed client constructor without exposing raw exceptions", async () => {
+    vi.stubEnv("AUTH_RATE_LIMIT_SECRET", "");
+    const missing = await call();
+    const missingBody = await missing.json();
+    expect(missing.status).toBe(503);
+    expect(missingBody.code).toBe("SG_AUTH_SETUP");
+    expect(missingBody.error).toContain("AUTH_RATE_LIMIT_SECRET");
+    expect(missingBody.error).toContain(missingBody.reference);
+    vi.stubEnv("AUTH_RATE_LIMIT_SECRET", secret);
+    mocks.serviceDb.mockImplementationOnce(() => {
+      throw new Error(canary);
+    });
+    const constructor = await call();
+    const constructorBody = await constructor.json();
+    expect(constructor.status).toBe(503);
+    expect(constructorBody.code).toBe("SG_AUTH_SETUP");
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants authentication unavailable",
+      expect.objectContaining({
+        stage: "database_client",
+        databaseCode: "NOT_APPLICABLE",
+        reference: constructorBody.reference,
+      }),
+    );
+    expect(JSON.stringify(constructorBody)).not.toContain(canary);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      canary,
+    );
+    noDelivery();
+  });
+});

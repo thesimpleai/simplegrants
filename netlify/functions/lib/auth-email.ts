@@ -1,7 +1,7 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
-import { env, escapeHtml, HttpError } from "./core";
+import { env, escapeHtml, HttpError, json } from "./core";
 
 export const AUTH_EMAIL_ACCEPTED =
   "If this address can sign in, we’ll email a secure Simple Grants link. Check your inbox and spam folder.";
@@ -82,6 +82,115 @@ export function trustedAuthIp(ip: string | undefined): string {
       "The sign-in request could not be verified. Please try again from the Simple Grants website.",
     );
   return ip.toLowerCase();
+}
+
+export type AuthFailureStage =
+  | "origin_setup"
+  | "request_validation"
+  | "client_ip"
+  | "auth_config"
+  | "database_client"
+  | "rate_claim"
+  | "rate_claim_result"
+  | "eligibility_lookup"
+  | "eligibility_result";
+const knownDatabaseCodes = new Set([
+  "PGRST000",
+  "PGRST001",
+  "PGRST002",
+  "PGRST003",
+  "PGRST106",
+  "PGRST202",
+  "PGRST204",
+  "PGRST301",
+  "PGRST302",
+  "PGRST303",
+  "42501",
+  "42P01",
+  "42883",
+  "3F000",
+  "25001",
+  "22023",
+  "23514",
+  "28000",
+  "28P01",
+  "INVALID_API_KEY",
+  "BAD_JWT",
+  "INVALID_JWT",
+  "INVALID_RESPONSE",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "EAI_AGAIN",
+]);
+function safeDatabaseCode(error: unknown, status?: number): string {
+  const code =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+      ? error.code.toUpperCase()
+      : "";
+  if (knownDatabaseCodes.has(code)) return code;
+  if (status === 0) return "NETWORK";
+  if (
+    status !== undefined &&
+    [400, 401, 403, 404, 406, 409, 429, 500, 502, 503, 504].includes(status)
+  )
+    return `HTTP_${status}`;
+  return "OTHER";
+}
+
+/** Safe infrastructure diagnostics only: never pass raw provider messages to logs or callers. */
+export function authUnavailable(
+  stage: AuthFailureStage,
+  error?: unknown,
+  status?: number,
+  safeSetupMessage?: string,
+): Response {
+  const databaseStage =
+    stage === "rate_claim" ||
+    stage === "rate_claim_result" ||
+    stage === "eligibility_lookup" ||
+    stage === "eligibility_result";
+  const databaseCode = databaseStage
+    ? safeDatabaseCode(error, status)
+    : "NOT_APPLICABLE";
+  let code = databaseStage ? "SG_AUTH_DATABASE" : "SG_AUTH_SETUP";
+  if (["PGRST106", "3F000"].includes(databaseCode)) code = "SG_AUTH_SCHEMA";
+  else if (["PGRST202", "42883", "42P01"].includes(databaseCode))
+    code = "SG_AUTH_RPC";
+  else if (
+    [
+      "42501",
+      "28000",
+      "28P01",
+      "PGRST301",
+      "PGRST302",
+      "PGRST303",
+      "INVALID_API_KEY",
+      "BAD_JWT",
+      "INVALID_JWT",
+      "HTTP_401",
+      "HTTP_403",
+    ].includes(databaseCode)
+  )
+    code = "SG_AUTH_ACCESS";
+  const reference = randomUUID();
+  console.error("Simple Grants authentication unavailable", {
+    stage,
+    databaseCode,
+    code,
+    reference,
+  });
+  const message =
+    safeSetupMessage ||
+    "Simple Grants sign-in is temporarily unavailable. Please try again.";
+  return json(
+    { error: `${message} Reference: ${reference} (${code}).`, code, reference },
+    503,
+  );
 }
 
 export function authEmailContent(link: string) {

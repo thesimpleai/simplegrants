@@ -50,6 +50,29 @@ The limiter allows five claimed requests per email per hour and twenty per IP pe
 
 There is no CAPTCHA in this flow. Automated clients can spoof an Origin header and omit a honeypot; distributed bots can work around individual IP limits. Existing-user-only delivery and per-email quotas reduce unwanted mail, but do not eliminate abuse. Enabling public signups increases that exposure. Monitor delivery volume and provider costs, and add stronger challenges later if observed abuse requires them.
 
+## If sign-in says “temporarily unavailable”
+
+The message alone does not identify the cause. The diagnostic update adds a safe reference; it improves diagnosis rather than proving that a configuration or DNS fault exists.
+
+1. **Check the deployed revision.** Confirm that Netlify's completed production deploy matches the current GitHub `main` commit. After the diagnostic update is deployed, make one fresh request from `https://simplegrants.com.au` and note its time, `SG_AUTH_…` code and reference. Server failures include a UUID reference; browser response/network fallbacks may have only their fixed code. If no reference appears, first confirm the deployed revision and whether the function ran.
+2. **Read the `auth-email` Function logs.** In this site's Netlify Function logs, select `auth-email` and find `Simple Grants authentication unavailable` with that reference. Its safe fields are `stage`, `databaseCode`, `code` and `reference`. Share only those labels when asking for help; keep key values, addresses, request headers and login links private.
+3. **Follow the relevant check below.** In the production **Functions** scope, check the presence of `AUTH_RATE_LIMIT_SECRET`, `RESEND_API_KEY`, `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Review all four auth settings above, including canonical origin and sender. The server URL/key must belong to the intended same project. Builds-only values are unavailable to Functions. Redeploy after a diagnosed scope/configuration change.
+4. **For a database-stage failure, run the read-only diagnostic.** In the intended Supabase project's SQL Editor, run [`supabase/diagnostics/auth-email.sql`](../supabase/diagnostics/auth-email.sql). It checks catalog objects and grants without calling application RPCs or reading user records.
+
+| Code | First check |
+| --- | --- |
+| `SG_AUTH_SETUP` | Log `stage`: canonical origin, trusted Netlify client IP, required environment values or client construction. |
+| `SG_AUTH_SCHEMA` | The intended `simple_grant` schema and its Data API exposure; preserve the other exposed schemas. |
+| `SG_AUTH_RPC` | Required table/helper signatures and migration 005 status; also check the REST schema cache. |
+| `SG_AUTH_ACCESS` | The server key's project/role and required service-role grants; use the diagnostic before changing permissions. |
+| `SG_AUTH_DATABASE` | The safe `databaseCode`: other RPC, transport or unexpected-response failures need diagnosis from that evidence. |
+| `SG_AUTH_RESPONSE` | Browser-only fallback: inspect the deployed function/route and HTTP status. HTML or an unexpected API response is not an accepted email request. |
+| `SG_AUTH_NETWORK` | Browser request did not complete. Check connectivity and whether a matching function invocation exists; this does not identify a DNS/configuration fault. |
+
+The SQL result's `database_prerequisites` distinguishes `objects_missing`, `wrong_permission`, `wrong_configuration` and `ready`. A ready schema with the limiter table and both helpers absent matches an 001–004 installation without 005; confirm the intended project/version before applying a repair. `ready` covers database prerequisites only. `api_schema_setting.status=unknown` is inconclusive because the SQL session cannot always observe managed Data API settings.
+
+Do not blindly rerun migration 005 or the full installer. Keep shared Auth settings and the limiter unchanged; do not rotate working keys or enable signups as a workaround. Account-dependent token/sending failures still use the generic HTTP 202 acknowledgement, so it is not proof of delivery. For that different outcome, inspect Resend delivery logs for the expected message.
+
 ## Verify before inviting users
 
 - Confirm that an email arrives from the verified `simplegrants.com.au` sender and opens the canonical HTTPS application domain.

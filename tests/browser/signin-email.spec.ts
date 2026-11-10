@@ -115,7 +115,11 @@ test("a failed request displays an error and allows an ordinary email retry", as
         ? {
             status: 503,
             json: {
-              error: "Sign-in is temporarily unavailable. Please try again.",
+              error:
+                "Simple Grants sign-in is temporarily unavailable. Please try again. Reference: 3e652827-650e-49cb-959b-e94361cf070f (SG_AUTH_DATABASE).",
+              code: "SG_AUTH_DATABASE",
+              reference: "3e652827-650e-49cb-959b-e94361cf070f",
+              diagnostic: "private-response-marker",
             },
           }
         : { status: 202, json: { accepted: true } },
@@ -127,7 +131,13 @@ test("a failed request displays an error and allows an ordinary email retry", as
     .fill("member@example.invalid");
   await page.getByRole("button", { name: "Email me a sign-in link" }).click();
   await expect(page.getByRole("alert")).toContainText(
-    "Sign-in is temporarily unavailable",
+    "Simple Grants sign-in is temporarily unavailable",
+  );
+  await expect(page.getByRole("alert")).toContainText(
+    "3e652827-650e-49cb-959b-e94361cf070f (SG_AUTH_DATABASE)",
+  );
+  await expect(page.locator("body")).not.toContainText(
+    "private-response-marker",
   );
   const retry = page.getByRole("button", { name: "Email me a sign-in link" });
   await expect(retry).toBeEnabled();
@@ -178,5 +188,106 @@ test("the hidden website field is excluded from normal interaction but included 
       website: "https://automated.example.invalid",
     },
   ]);
+  await checks.assertNoOtherAuthProviders();
+});
+
+const invalidResponses = [
+  {
+    name: "a 200 HTML SPA fallback",
+    status: 200,
+    contentType: "text/html",
+    body: "<!doctype html><html><body>private-response-marker</body></html>",
+  },
+  {
+    name: "a 500 HTML error page",
+    status: 500,
+    contentType: "text/html",
+    body: "<html><body>private-response-marker</body></html>",
+  },
+  {
+    name: "a 500 JSON error payload",
+    status: 500,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "private-response-marker" }),
+  },
+  {
+    name: "malformed acknowledgement JSON",
+    status: 202,
+    contentType: "application/json",
+    body: '{"accepted":private-response-marker}',
+  },
+  {
+    name: "a truthy non-boolean acknowledgement",
+    status: 202,
+    contentType: "application/json",
+    body: JSON.stringify({
+      accepted: "true",
+      error: "private-response-marker",
+    }),
+  },
+  {
+    name: "a null JSON response",
+    status: 202,
+    contentType: "application/json",
+    body: "null",
+  },
+  {
+    name: "a valid acknowledgement with the wrong HTTP status",
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ accepted: true }),
+  },
+];
+for (const response of invalidResponses) {
+  test(`sign-in rejects ${response.name} without showing a sent-email notice`, async ({
+    page,
+  }) => {
+    const checks = await prepareSignIn(page);
+    await page.route("**/api/auth-email", (route) => route.fulfill(response));
+    await page.goto("/");
+    await page
+      .getByRole("textbox", { name: "Your email address" })
+      .fill("member@example.invalid");
+    await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+    await expect(page.getByRole("alert")).toContainText("SG_AUTH_RESPONSE");
+    await expect(page.getByText(submittedNotice, { exact: false })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".toast")).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(
+      "private-response-marker",
+    );
+    await expect(
+      page.getByRole("button", { name: "Email me a sign-in link" }),
+    ).toBeEnabled();
+    await checks.assertNoOtherAuthProviders();
+  });
+}
+
+test("a failed sign-in connection shows a safe network reference and permits retry", async ({
+  page,
+}) => {
+  const checks = await prepareSignIn(page);
+  let requests = 0;
+  await page.route("**/api/auth-email", (route) => {
+    requests++;
+    return requests === 1
+      ? route.abort()
+      : route.fulfill({ status: 202, json: { accepted: true } });
+  });
+  await page.goto("/");
+  await page
+    .getByRole("textbox", { name: "Your email address" })
+    .fill("member@example.invalid");
+  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await expect(page.getByRole("alert")).toContainText("SG_AUTH_NETWORK");
+  await expect(page.getByText(submittedNotice, { exact: false })).toHaveCount(
+    0,
+  );
+  const retry = page.getByRole("button", { name: "Email me a sign-in link" });
+  await expect(retry).toBeEnabled();
+  await retry.click();
+  await expect(page.getByText(submittedNotice, { exact: false })).toBeVisible();
+  expect(requests).toBe(2);
   await checks.assertNoOtherAuthProviders();
 });
