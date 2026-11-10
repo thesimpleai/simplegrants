@@ -20,7 +20,7 @@ export interface AppContextValue {
   toast: string;
   notify: (message: string) => void;
   selectOrg: (id: string) => void;
-  signIn: (email: string) => Promise<void>;
+  signIn: (email: string, captchaToken?: string) => Promise<void>;
   signOut: () => Promise<void>;
   createOrg: (name: string, frequency: Frequency) => Promise<void>;
   updateOrg: (patch: Partial<Organisation>) => Promise<void>;

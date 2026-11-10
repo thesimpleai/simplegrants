@@ -17,6 +17,8 @@ import type {
 import type { AppContextValue } from "./contracts";
 import { configured, supabase } from "./supabase";
 import { DOCUMENT_BUCKET } from "./constants";
+import { signOutFromSimpleGrant } from "./auth-session";
+import { safeAuthReturnPath } from "./auth-links";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
 const empty: OrgData = {
   documents: [],
@@ -501,25 +503,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }));
     notify("Message updated.");
   }
-  async function signIn(email: string) {
+  async function signIn(email: string, captchaToken?: string) {
     if (!supabase)
-      throw new Error("Connect Supabase first to enable secure sign-in.");
-    const next =
-      window.location.origin +
-      window.location.pathname +
-      window.location.search;
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: next },
+      throw new Error("Sign-in is unavailable in the demo workspace.");
+    if (!captchaToken)
+      throw new Error("Please complete the security check and try again.");
+    const response = await fetch("/api/auth-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: email.trim(),
+        captchaToken,
+        next: safeAuthReturnPath(
+          window.location.pathname + window.location.search,
+        ),
+      }),
     });
-    if (error) throw error;
-    notify("Check your email for your secure sign-in link.");
+    const body = await response
+      .json()
+      .catch(() => ({
+        error: "Sign-in is temporarily unavailable. Please try again shortly.",
+      }));
+    if (!response.ok)
+      throw new Error(
+        typeof body.error === "string"
+          ? body.error
+          : "Your sign-in email could not be requested. Please try again shortly.",
+      );
+    notify(
+      "If this address can sign in, a Simple Grants email will arrive shortly.",
+    );
   }
   async function signOut() {
-    if (supabase) {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
-    }
+    if (supabase) await signOutFromSimpleGrant(supabase);
   }
   return (
     <Context.Provider

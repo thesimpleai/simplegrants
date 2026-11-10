@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Turnstile from "./components/Turnstile";
 import {
   ArrowRight,
   Bell,
@@ -55,7 +56,14 @@ export default function App() {
     [error, setError] = useState(""),
     [email, setEmail] = useState(""),
     [emailSent, setEmailSent] = useState(false),
+    [captchaToken, setCaptchaToken] = useState<string | null>(null),
+    [captchaReset, setCaptchaReset] = useState(0),
     [search, setSearch] = useState("");
+  const onCaptchaToken = useCallback(
+    (token: string | null) => setCaptchaToken(token),
+    [],
+  );
+  const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "";
   function navigate(target: string) {
     const parts = target.split("&");
     setPage(parts[0]);
@@ -86,15 +94,18 @@ export default function App() {
     }
   }
   async function login() {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
-      await app.signIn(email);
+      await app.signIn(email, captchaToken ?? undefined);
       setEmailSent(true);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setBusy(false);
+      setCaptchaToken(null);
+      setCaptchaReset((value) => value + 1);
     }
   }
   if (app.configured && !app.user)
@@ -149,7 +160,16 @@ export default function App() {
                 onChange={(e) => setEmail(e.target.value)}
               />
             </label>
-            <button className="button primary" disabled={busy}>
+            <Turnstile
+              siteKey={turnstileSiteKey}
+              onToken={onCaptchaToken}
+              resetKey={captchaReset}
+              disabled={busy}
+            />
+            <button
+              className="button primary"
+              disabled={busy || !captchaToken || !turnstileSiteKey}
+            >
               {busy ? (
                 <Busy label="Sending your link…" />
               ) : (
@@ -160,8 +180,9 @@ export default function App() {
             </button>
             {emailSent && (
               <Notice>
-                Check your email and follow your sign-in link. Your grant link
-                will be waiting for you when you return.
+                If this address can sign in, you’ll receive an email from Simple
+                Grants. Open the link, then choose Sign in. Your grant link will
+                be waiting when you return.
               </Notice>
             )}
             {error && (

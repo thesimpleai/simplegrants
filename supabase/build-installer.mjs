@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Bundle the four canonical baselines into one atomic shared-project installer.
+// Bundle the canonical baselines into one atomic shared-project installer.
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

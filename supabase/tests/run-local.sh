@@ -2,11 +2,12 @@
 # Disposable shared-project PostgreSQL test; no hosted credentials or networking.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# The default command executes BOTH isolated policy scenarios. Each child run
+# The default command executes all isolated policy/upgrade scenarios. Each child run
 # gets a new PostgreSQL container, so role/cluster setup cannot leak between them.
 if [ "$#" -eq 0 ]; then
   bash "$0" --adversarial
   bash "$0" --hosted-policies
+  bash "$0" --upgrade-auth-email
   exit
 fi
 case "$1" in
@@ -14,11 +15,11 @@ case "$1" in
     policy_fixture='shared-project-fixture.sql'
     legacy_checks='legacy-behavior.sql'
     ;;
-  --hosted-policies)
+  --hosted-policies|--upgrade-auth-email)
     policy_fixture='hosted-policy-fixture.sql'
     legacy_checks='hosted-policy-behavior.sql'
     ;;
-  *) echo 'Usage: run-local.sh [--adversarial|--hosted-policies]' >&2; exit 2 ;;
+  *) echo 'Usage: run-local.sh [--adversarial|--hosted-policies|--upgrade-auth-email]' >&2; exit 2 ;;
 esac
 printf 'Database scenario: %s\n' "$1"
 node "$repo_root/supabase/build-installer.mjs" --check
@@ -71,17 +72,42 @@ $$;
 delete from storage.buckets where id = 'simple-grant-documents';
 select 'PASS: incompatible SG bucket rejected unchanged; entire installer rolled back' as result;
 SQL
-run_sql "$repo_root/supabase/install-simple-grant.sql"
+if [ "$1" = '--upgrade-auth-email' ]; then
+  # Reproduce an already-installed 001-004 project, then apply ONLY the real005.
+  node --input-type=module - "$repo_root" "$test_dir/baseline.sql" <<'JS'
+import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
+const [root,target] = process.argv.slice(2);
+const files = readdirSync(`${root}/supabase/migrations`).filter((file)=>file.endsWith('.sql') && file < '202611100005_auth_email.sql').sort();
+if (files.length !== 4) throw new Error('Upgrade fixture expects baselines001-004');
+const parts = files.map((file)=>readFileSync(`${root}/supabase/migrations/${file}`,'utf8').split(/\r?\n/).filter((line)=>!['begin;','commit;'].includes(line.trim().toLowerCase())).join('\n'));
+writeFileSync(target,`begin;\n${parts.join('\n')}\ncommit;\n`);
+JS
+  run_sql "$test_dir/baseline.sql"
+  docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+insert into simple_grant.organizations(id,name,notification_frequency,profile)
+ values ('80000000-0000-4000-8000-000000000001','Preserved Simple Grant organisation','never','{"upgrade_sentinel":"must remain"}');
+SQL
+  run_sql "$repo_root/supabase/migrations/202611100005_auth_email.sql"
+  docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+do $$begin
+ if not exists(select 1 from simple_grant.organizations where id='80000000-0000-4000-8000-000000000001' and name='Preserved Simple Grant organisation' and profile->>'upgrade_sentinel'='must remain') then raise exception '005 changed existing SG data'; end if;
+end$$;
+delete from simple_grant.organizations where id='80000000-0000-4000-8000-000000000001';
+select 'PASS: 005-only upgrade preserved existing001-004 SG organisation' as result;
+SQL
+else
+  run_sql "$repo_root/supabase/install-simple-grant.sql"
+fi
 docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 -tA \
   < "$repo_root/supabase/verify-shared-project.sql" > "$test_dir/after.json"
 node --input-type=module - "$test_dir/before.json" "$test_dir/after.json" <<'JS'
 import {readFileSync} from 'node:fs';
 const [before, after] = process.argv.slice(2).map((path)=>JSON.parse(readFileSync(path,'utf8')));
 if (before.unrelated_metadata_fingerprint !== after.unrelated_metadata_fingerprint || before.unrelated_object_count !== after.unrelated_object_count) throw new Error('Unrelated application metadata changed');
-if (!after.simple_grant_schema_exists || after.simple_grant_tables.length !== 12 || after.simple_grant_tables.some((table)=>!table.rls || table.anon_select)) throw new Error('Expected isolated RLS tables not found');
+if (!after.simple_grant_schema_exists || after.simple_grant_tables.length !== 13 || after.simple_grant_tables.some((table)=>!table.rls || table.anon_select)) throw new Error('Expected isolated RLS tables not found');
 if (after.simple_grant_bucket?.public !== false) throw new Error('SG bucket is not private');
 if (after.storage_policies.filter((policy)=>policy.name.startsWith('simple_grant_documents_')).length !== 8) throw new Error('Expected eight SG storage policies');
-process.stdout.write('PASS: unrelated public/auth/storage/history metadata fingerprint unchanged; 12 SG RLS tables, private bucket, eight SG storage policies.\n');
+process.stdout.write('PASS: unrelated public/auth/storage/history metadata fingerprint unchanged; 13 SG RLS tables, private bucket, eight SG storage policies.\n');
 JS
 # Reapplying an already-installed baseline must fail; never drop/reset to force it.
 if run_sql "$repo_root/supabase/install-simple-grant.sql" > /dev/null 2> "$test_dir/reinstall-error.log"; then
@@ -93,3 +119,6 @@ case "$(cat "$test_dir/reinstall-error.log")" in
 esac
 run_sql "$repo_root/supabase/tests/$legacy_checks"
 run_sql "$repo_root/supabase/tests/rls.sql"
+
+run_sql "$repo_root/supabase/tests/auth-email.sql"
+node "$repo_root/supabase/tests/auth-email-concurrency.mjs" "$container_name"

@@ -17,7 +17,7 @@ Without Supabase settings, the portal opens an explicitly labelled fictional dem
 
 ## Implemented
 
-- Email-link sign-in with Supabase Auth and several organisations under one account.
+- Simple Grants-branded Resend email-link sign-in with Turnstile, durable request limits and app-specific session storage; shared Supabase Auth identities and several organisations under one account.
 - Private, organisation-scoped document storage with database and storage row-level security, isolated in the `simple_grant` schema and `simple-grant-documents` bucket for shared Supabase projects.
 - Organisation onboarding with three Gemini passes: extract, check against originals, correct, then human approval.
 - Google Search-grounded discovery, user-supplied opportunity imports and saved opportunities. Eligibility remains for review; the application does not invent match scores.
@@ -40,14 +40,14 @@ For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml
 
 For an existing shared Supabase project:
 
-1. Run the reviewed **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)** once in its SQL Editor.
+1. For a fresh installation, run **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)** once in its SQL Editor. If migrations 001–004 are already installed, apply **only** [`005_auth_email`](supabase/migrations/202611100005_auth_email.sql).
 2. Append `simple_grant` to the existing Data API exposed schemas.
-3. Add `https://simplegrants.netlify.app/**` to the existing Auth redirects.
-4. Enter the project URL and appropriate public/server keys in Netlify, deploy, and test sign-in and private uploads.
+3. Follow [Authentication](docs/AUTHENTICATION.md) to verify the Resend login sender on `simplegrants.com.au` and configure Turnstile and the new login environment variables.
+4. Configure migration 005, the six new login settings, Resend domain verification and Turnstile before merging/deploying `fix/simple-grants-auth` to production. Then request a fresh Simple Grants email and test sign-in and private uploads. Default preview origins cannot exercise the production login route.
 
-Keep the shared Auth Site URL, SMTP, signup settings and other redirects unchanged. **Do not run `supabase db push`, reset or migration-history repair against the shared project.** The dedicated schema/bucket preserves unrelated tables and CLI history; earlier public-schema Simple Grant data requires a separate reviewed migration. The server service key remains privileged across the entire project. Someone with project access must apply and test hosted setup; local tests have not verified it.
+Keep the shared Auth Site URL, SMTP, templates, signup settings and other redirects unchanged. Simple Grants uses its own `/auth/confirm` page; its email branding and app-local sessions do not create an independent Auth user pool. **Do not run `supabase db push`, reset or migration-history repair against the shared project.** The dedicated schema/bucket preserves unrelated tables and CLI history; earlier public-schema Simple Grant data requires a separate reviewed migration. The server service key remains privileged across the entire project. Someone with project access must apply and test hosted setup; local tests have not verified it.
 
-The brief mentions both `thesimpleai.com` and `simpleai.com.au`. The domain is configurable. Choose an owned, verified domain; using a dedicated receiving subdomain avoids replacing an existing staff mailbox’s MX records.
+Login emails use `Simple Grants <login@simplegrants.com.au>` after Resend domain verification. Other application emails still use the separate `EMAIL_FROM` setting. The original brief mentions both `thesimpleai.com` and `simpleai.com.au`. The domain is configurable. Choose an owned, verified domain; using a dedicated receiving subdomain avoids replacing an existing staff mailbox’s MX records.
 
 ## Australian grant requirements
 

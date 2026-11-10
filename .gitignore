@@ -9,3 +9,6 @@ test-results/
 *.log
 supabase/.temp/
 supabase/.branches/
+
+# Local-only generated auth throttle secret.
+simple-grants-auth-rate-limit-secret.txt

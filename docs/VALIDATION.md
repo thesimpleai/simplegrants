@@ -13,9 +13,9 @@ The original implementation was validated in the development environment on 10 N
 
 During the clean-install rerun, the old development server retained an obsolete Vite dependency cache. Its requests returned `504 Outdated Optimize Dep`. Restarting that server after installation fixed it; the complete browser suite then passed with a fresh test-managed server. No assertions were disabled.
 
-## Shared-project isolation update
+## Shared-project isolation update (historical run)
 
-Simple Grant now targets the dedicated `simple_grant` schema and private `simple-grant-documents` bucket. `supabase/install-simple-grant.sql` combines the four canonical migrations into one transaction for the SQL Editor without modifying an existing shared project's CLI migration history. It does not alter unrelated public tables or automatically move legacy Simple Grant data. Deployment requires appending the custom exposed schema and adding the application's Auth redirect while preserving the existing global Auth settings and redirect list.
+This run moved Simple Grant into the dedicated `simple_grant` schema and private `simple-grant-documents` bucket. At that stage the combined SQL Editor installer contained four migrations and login used the native shared Auth email flow. The tests below concern that version. The current app-specific login adds migration 005 and its own token-confirmation callback; its deployment does not require changing the shared project's global Auth settings or redirects.
 
 Validated the shared-project update locally on 10 November 2026:
 
@@ -31,9 +31,25 @@ An actual project sign-in and Storage API upload/download check is still require
 
 No hosted installer or project settings have been applied by these local checks. The live project has not been linked or verified, and no live credentials have been tested.
 
+## App-specific Resend login update
+
+The current login flow keeps shared Supabase identities while sending a Simple Grants email through a server-only Resend route. It adds a dedicated `/auth/confirm` return page, hostname/action-checked Turnstile, durable HMAC email/IP quotas, generic account acknowledgements and app/project-specific browser storage with local-only logout. The callback clears the token fragment before the user explicitly confirms sign-in. Native URL session detection is disabled, so legacy implicit/PKCE links require a fresh application-specific email after rollout. There is no fallback to the shared project's email templates when security/provider configuration is absent.
+
+Existing 001–004 installations use only `202611100005_auth_email.sql`; fresh installations use the five-migration combined installer. No global SMTP, Site URL, email-template, signup-setting or unrelated-redirect change is part of this update. `AUTH_ALLOW_SIGNUPS=false` restricts delivery to existing shared accounts unless onboarding is explicitly enabled.
+
+This change is staged for `fix/simple-grants-auth`; production rollout waits for migration 005, the six new settings, Resend sender verification and Turnstile. Default preview origins are deliberately rejected by the canonical-origin check. Validated locally on 11 November 2026:
+
+- `npm test`: **77 tests passed across eight files**, including branded-email request guards, generic account acknowledgements, fixed application-origin links, provider failure handling, auth-session isolation and same-origin return paths. Provider calls are mocked; no real email was sent.
+- `npm run build`: TypeScript and the production build passed.
+- `npm run test:browser`: **17 Chromium workflows passed**, including explicit confirmation before token use, fragment removal, rejection of external returns, missing/expired CAPTCHA, the real SDK ignoring unsolicited implicit/PKCE callbacks, and the app login request preserving a grant deep link without calling Supabase’s shared OTP mailer.
+- The database test suite passed fresh adversarial and exact-policy fixtures, plus an existing 001–004 installation upgraded with **005 only**, preserving its existing organisation. Service-only ACLs, sequential quotas, bounded cleanup and real concurrency were exercised: one of twelve simultaneous same-email requests and twenty of twenty-five same-IP requests claimed a slot.
+- The generated five-migration installer matches its canonical sources. Existing shared metadata, legacy file rules and migration history stayed unchanged in the isolated SQL tests.
+
+These are local code/database checks, not hosted provider delivery or account-setting verification. A mocked email/API test is not proof that the sending domain is verified or that a real login email/callback works. No real login email has been sent by these local checks.
+
 ## Not yet validated
 
-At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the installer, API exposure or Auth redirect has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.
+At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification, Turnstile widget or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.
 
 Official Australian government research pages were blocked by the cloud network policy. The research document marks its primary-source links and current-law verification status accordingly. Do not treat its background thresholds as a live legal determination.
 
