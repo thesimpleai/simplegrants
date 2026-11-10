@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import type { AppContextValue } from "./contracts";
 import { configured, supabase } from "./supabase";
+import { DOCUMENT_BUCKET } from "./constants";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
 const empty: OrgData = {
   documents: [],
@@ -218,22 +219,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         );
       const path = `${org.id}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
       const { error } = await supabase.storage
-        .from("documents")
+        .from(DOCUMENT_BUCKET)
         .upload(path, file, { contentType: file.type });
       if (error) throw error;
-      const result = await supabase
-        .from("documents")
-        .insert({
-          org_id: org.id,
-          name: file.name,
-          category,
-          storage_path: path,
-          mime_type: file.type,
-          size_bytes: file.size,
-          verified: false,
-        });
+      const result = await supabase.from("documents").insert({
+        org_id: org.id,
+        name: file.name,
+        category,
+        storage_path: path,
+        mime_type: file.type,
+        size_bytes: file.size,
+        verified: false,
+      });
       if (result.error) {
-        await supabase.storage.from("documents").remove([path]);
+        await supabase.storage.from(DOCUMENT_BUCKET).remove([path]);
         throw result.error;
       }
     }
@@ -253,7 +252,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         .eq("org_id", orgId);
       if (result.error) throw result.error;
       const storage = await supabase.storage
-        .from("documents")
+        .from(DOCUMENT_BUCKET)
         .remove([doc.storage_path]);
       if (storage.error)
         notify(
@@ -274,7 +273,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         "This is an example document. Connect Supabase to upload and view real files.",
       );
     const { data: link, error } = await supabase.storage
-      .from("documents")
+      .from(DOCUMENT_BUCKET)
       .createSignedUrl(doc.storage_path, 60);
     if (error) throw error;
     window.open(link.signedUrl, "_blank", "noopener,noreferrer");
@@ -298,11 +297,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
       body: JSON.stringify({ ...payload, orgId }),
     });
-    const body = await response
-      .json()
-      .catch(() => ({
-        error: "The server could not respond. Please try again.",
-      }));
+    const body = await response.json().catch(() => ({
+      error: "The server could not respond. Please try again.",
+    }));
     if (!response.ok)
       throw new Error(
         [

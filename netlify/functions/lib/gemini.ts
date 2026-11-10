@@ -1,5 +1,4 @@
 import { GoogleGenAI, type Part } from "@google/genai";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import {
   env,
@@ -9,7 +8,8 @@ import {
   stripSensitive,
   validABN,
 } from "./core";
-import { checked } from "./db";
+import { checked, type AppDb } from "./db";
+import { DOCUMENT_BUCKET } from "../../../src/lib/constants";
 import type {
   DocumentRecord,
   Opportunity,
@@ -73,7 +73,7 @@ export async function generateJSON(prompt: string, parts: Part[] = []) {
 }
 
 export async function documentParts(
-  db: SupabaseClient,
+  db: AppDb,
   orgId: string,
   ids: string[],
 ): Promise<{ parts: Part[]; documents: DocumentRecord[] }> {
@@ -105,7 +105,7 @@ export async function documentParts(
         "Please select documents totalling less than 15 MB, with each file no larger than 10 MB.",
       );
     const { data, error } = await db.storage
-      .from("documents")
+      .from(DOCUMENT_BUCKET)
       .download(doc.storage_path);
     if (error || !data)
       throw new HttpError(
@@ -221,10 +221,7 @@ function dateOnly(value: string | null | undefined) {
     ? value
     : null;
 }
-export async function discoverOpportunities(
-  db: SupabaseClient,
-  org: Organisation,
-) {
+export async function discoverOpportunities(db: AppDb, org: Organisation) {
   const result = await client().models.generateContent({
     model: process.env.GEMINI_MODEL || "gemini-flash-latest",
     contents: `Find up to 6 current Australian grant opportunities suitable for this organisation, as of ${new Date().toISOString().slice(0, 10)}. Use web search, primary grant providers, real currently-open or forthcoming rounds. Cite sources for each. State amounts, open and closing dates including timezone ONLY when explicitly available. Do not invent deadlines or suggest expired rounds. Explain uncertainty and mandatory requirements. Public organisation profile: ${JSON.stringify(stripSensitive({ name: org.name, type: org.type, state: org.state, description: org.description, focus_areas: org.focus_areas }))}`,
@@ -319,7 +316,7 @@ export async function discoverOpportunities(
   };
 }
 export async function importOpportunity(
-  db: SupabaseClient,
+  db: AppDb,
   org: Organisation,
   text: string,
   parts: Part[],
@@ -333,12 +330,10 @@ export async function importOpportunity(
     `Extract ONE Australian grant from the supplied source materials. Return {"title":"","funder":"","summary":"","source_url":"","guidelines_text":"full relevant eligibility, assessment criteria, application questions and word limits, budget rules, dates and evidence requirements from supplied source; empty if no actual guidelines","amount_min":null,"amount_max":null,"opens_on":null,"closes_at":null,"location":"","focus_areas":[],"requirements":[]}. Preserve accurate source guideline wording with no invented sections. A flyer or short description alone is NOT program guidelines: leave guidelines_text empty. Financial statements, an audit or insurance are required only if explicitly required in the sources. Date-only deadlines with unknown timezone must have closes_at null and be described in summary. Source materials:\n${text}`,
     parts,
   );
-  const schema = opportunityDraftSchema
-    .omit({ source_index: true })
-    .extend({
-      source_url: z.string().max(2000).optional(),
-      guidelines_text: z.string().max(100000).optional(),
-    });
+  const schema = opportunityDraftSchema.omit({ source_index: true }).extend({
+    source_url: z.string().max(2000).optional(),
+    guidelines_text: z.string().max(100000).optional(),
+  });
   const row = schema.parse(data);
   const grant = checked(
     await db

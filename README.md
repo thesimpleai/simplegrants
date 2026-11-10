@@ -18,7 +18,7 @@ Without Supabase settings, the portal opens an explicitly labelled fictional dem
 ## Implemented
 
 - Email-link sign-in with Supabase Auth and several organisations under one account.
-- Private, organisation-scoped document storage with database and storage row-level security.
+- Private, organisation-scoped document storage with database and storage row-level security, isolated in the `simple_grant` schema and `simple-grant-documents` bucket for shared Supabase projects.
 - Organisation onboarding with three Gemini passes: extract, check against originals, correct, then human approval.
 - Google Search-grounded discovery, user-supplied opportunity imports and saved opportunities. Eligibility remains for review; the application does not invent match scores.
 - Applications gated by approved organisation facts, current guidelines, actual application questions, project information and required evidence. Editable drafts, downloads, status tracking and funder submission references.
@@ -38,7 +38,14 @@ The frontend uses React, TypeScript and Vite. Netlify Functions hold the Gemini 
 
 For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
 
-You can connect Supabase without sharing account access: create a project, apply every file in `supabase/migrations/` in filename order, then put the project URL and appropriate public/server keys directly in Netlify. If the assistant should apply migrations later, authenticate its CLI through secure environment settings rather than pasting a token into chat.
+For an existing shared Supabase project:
+
+1. Run the reviewed **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)** once in its SQL Editor.
+2. Append `simple_grant` to the existing Data API exposed schemas.
+3. Add `https://simplegrants.netlify.app/**` to the existing Auth redirects.
+4. Enter the project URL and appropriate public/server keys in Netlify, deploy, and test sign-in and private uploads.
+
+Keep the shared Auth Site URL, SMTP, signup settings and other redirects unchanged. **Do not run `supabase db push`, reset or migration-history repair against the shared project.** The dedicated schema/bucket preserves unrelated tables and CLI history; earlier public-schema Simple Grant data requires a separate reviewed migration. The server service key remains privileged across the entire project. Someone with project access must apply and test hosted setup; local tests have not verified it.
 
 The brief mentions both `thesimpleai.com` and `simpleai.com.au`. The domain is configurable. Choose an owned, verified domain; using a dedicated receiving subdomain avoids replacing an existing staff mailbox’s MX records.
 

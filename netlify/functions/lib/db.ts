@@ -1,20 +1,20 @@
-import {
-  createClient,
-  type SupabaseClient,
-  type User,
-} from "@supabase/supabase-js";
+import { createClient, type User } from "@supabase/supabase-js";
 import { env, HttpError } from "./core";
+import { DB_SCHEMA } from "../../../src/lib/constants";
 
 export function serviceDb() {
   return createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"), {
+    db: { schema: DB_SCHEMA },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
+export type AppDb = ReturnType<typeof serviceDb>;
+
 export async function authenticatedDb(
   request: Request,
   orgId: string,
   write = true,
-): Promise<{ db: SupabaseClient; user: User }> {
+): Promise<{ db: AppDb; user: User }> {
   const authorization = request.headers.get("authorization");
   if (!authorization?.startsWith("Bearer "))
     throw new HttpError(401, "Please sign in to continue.");
@@ -22,6 +22,7 @@ export async function authenticatedDb(
     process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
   if (!key) throw new HttpError(503, "Supabase is not configured.");
   const db = createClient(env("SUPABASE_URL"), key, {
+    db: { schema: DB_SCHEMA },
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: authorization } },
   });
@@ -55,7 +56,7 @@ export function checked<T>(result: {
     );
   return result.data;
 }
-export async function organisation(db: SupabaseClient, id: string) {
+export async function organisation(db: AppDb, id: string) {
   const { data, error } = await db
     .from("organizations")
     .select("*")

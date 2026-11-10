@@ -4,29 +4,33 @@ Simple Grant has a React portal, Netlify Functions, Supabase Auth/Postgres/priva
 
 The demonstration mode works without service keys and contains fictional records. It is for evaluating the interface. Live authentication, organisation data, AI calls, receiving email and scheduled summaries require the services below. Never use demonstration records as real funding opportunities.
 
-## 1. Create and connect Supabase
+## 1. Connect Supabase without changing other applications
 
-1. Create a Supabase project in your own account. Choose an Australian region, such as Sydney, if available and suitable for your requirements. Record the project reference and Project URL from the project settings.
-2. Review **all** SQL files in `supabase/migrations/`. Apply each file in filename order through the Supabase SQL Editor. Together these create the tenant tables, access policies, helper functions, private document bucket, shared portal/email AI quota and saved report-draft field. No application seed data is required. The private `documents` bucket accepts PDF, JPEG, PNG, WebP and plain text files up to 10 MiB each; export Word or spreadsheet material as PDF before uploading. AI requests allow at most eight selected documents totalling 15 MiB.
-3. Alternatively, use the CLI from the repository root:
+Simple Grant can use an existing Supabase project shared with other applications. Its tables and RPCs live in the dedicated `simple_grant` schema, and its private Storage bucket is `simple-grant-documents`. These names are fixed in the application; no extra schema or bucket environment variables are needed. Existing `public` tables and other applications' migration history must remain untouched.
 
-   ```sh
-   npx supabase login
-   npx supabase init
-   npx supabase link --project-ref YOUR_PROJECT_REF
-   npx supabase db push --dry-run
-   npx supabase db push
+1. Open the intended Supabase project and record its **Project URL** and public anon/publishable key. Use this same project's URL and public key in both corresponding browser and server settings below. Obtain the privileged service role/secret key for Functions only. The service key is privileged across the **entire shared project**, even though this application's code targets its own schema; never put it in the browser or chat.
+2. Review **`supabase/install-simple-grant.sql`**. This is the combined installer for the four baseline migrations, wrapped in **one transaction**. In that project's **SQL Editor**, paste and run the complete installer once. It creates Simple Grant's schema, tenant policies, private bucket, shared portal/email AI quota and saved report-draft field. No seed data is required. Run the complete file; do not apply fragments after an error.
+3. In **Settings → Data API / API → Exposed schemas**, **append `simple_grant`** to the existing list and save. Preserve every existing exposed schema. This step makes the new schema available through Supabase's REST API; creating tables alone does not expose it. If the API schema cache needs refreshing, the safe SQL notification is:
+
+   ```sql
+   notify pgrst, 'reload schema';
    ```
 
-   Authenticate using the CLI's supported login flow or a securely injected `SUPABASE_ACCESS_TOKEN`. The project database password, if requested, belongs in the CLI's secure prompt. Do not put access tokens, database passwords or API secrets in chat, source code or committed files. Run `supabase init` only when no local `supabase/config.toml` exists; do not overwrite an existing configuration. Run `db push` only against the intended project after reviewing its proposed migrations.
+   Do not replace the exposed-schema list or alter unrelated PostgREST configuration.
 
-4. Enable email authentication. Set **Authentication → URL Configuration → Site URL** to your final Netlify/custom domain. The login flow preserves grant deep links such as `/?org=…&view=opportunities&grant=…`. Allow those paths and query strings on the exact canonical hostname, for example `https://YOUR_SITE/**`, in **Redirect URLs**. For local Netlify development, add `http://localhost:8888/**`. Add staging origins individually if needed; do not allow arbitrary hosts or a broad `*.netlify.app` wildcard. Keep **Site URL** set to the canonical production origin.
-5. Review whether public account creation should be enabled; restrict signups during a private pilot. For production login emails, configure Supabase custom SMTP. Resend can supply the SMTP credentials; this is a separate configuration from the application's `RESEND_API_KEY`. Supabase's default mail service has delivery and rate restrictions and should not be assumed suitable for public launch.
-6. In Supabase's API settings, obtain the public anon/publishable key and the server-only service role key. Copy them directly into the appropriate Netlify environment settings below.
+4. Under **Authentication → URL Configuration → Redirect URLs**, **add** `https://simplegrants.netlify.app/**`. If you use another final hostname, add that exact hostname's path wildcard instead. The application explicitly passes its grant-preserving return URL for login, including `?org=…&view=opportunities&grant=…`. Add `http://localhost:8888/**` only for local Netlify development; add staging origins individually. Do not allow arbitrary hosts or a broad `*.netlify.app` wildcard.
+5. **Keep the shared project's existing Auth Site URL, SMTP, signup settings and other applications' redirects unchanged.** Those are project-wide settings. Changing them for Simple Grant could break another application. Any future email-provider or signup-policy change needs review across the project's applications.
+6. Enter the environment variables in Netlify, deploy the updated application, then test sign-in, organisation creation, private upload/download and cross-account isolation. The configured project is not considered linked or validated merely because its URL and keys were entered.
 
-You do not need to give this assistant access to your Supabase account. Applying the migration and entering keys in Netlify is sufficient. If you want the assistant to apply migrations later, provide a securely authenticated CLI environment scoped to the intended project, or an available Supabase integration. Share the project reference and URL as ordinary configuration, but provide access credentials through secure environment settings rather than chat.
+**For this shared project, do not run `supabase db push`, `supabase db reset` or migration-history `repair` commands.** The SQL Editor installer deliberately avoids modifying the unrelated CLI migration history. The files under `supabase/migrations/` are the canonical source baselines used to build the installer, not an instruction to push this repository's history over another application's history.
 
-Row-level security is the boundary between organisations. One login can own multiple organisations. New organisations are created with an atomic database RPC that also adds the initial owner. Service-role access is reserved for server work and bypasses RLS, so it must never be present in the browser. The first release does not include a self-service team invitation interface.
+The installer does not automatically move any earlier Simple Grant records from `public` or reuse another application's tables/bucket. If you previously installed the original public-schema version, preserve it and arrange a separate, reviewed data migration before switching real users. An existing `simple_grant` schema or `simple-grant-documents` bucket also needs investigation rather than deletion or an improvised reset.
+
+The private bucket accepts PDF, JPEG, PNG, WebP and plain text files up to 10 MiB each; export Word or spreadsheet material as PDF before uploading. AI requests allow at most eight selected documents totalling 15 MiB. Simple Grant adds access boundaries for its dedicated bucket while preserving existing Storage policies. A shared project's unknown restrictive policies may still block its operations; diagnose the specific failure and never remove or relax another application's policy just to make an upload work.
+
+You do not need to give this assistant account access to complete these steps. Apply the reviewed installer and enter the keys directly in Netlify. If you want the assistant to perform hosted setup later, provide an explicitly authorised, securely authenticated connection scoped to the intended work; do not paste access tokens, database passwords or API secrets in chat. The hosted installer and settings changes remain unapplied until someone with project access performs them.
+
+Row-level security separates organisations within Simple Grant. One login can own several organisations, and the creation RPC atomically adds the initial owner. The first release does not include a self-service team invitation interface. Sharing an Auth project does not automatically grant a user membership of a Simple Grant organisation.
 
 ## 2. Connect Netlify to GitHub
 
@@ -34,7 +38,7 @@ Row-level security is the boundary between organisations. One login can own mult
 2. Use the repository's `netlify.toml`: Node 22, build command `npm run build`, publish directory `dist`, and functions directory `netlify/functions`.
 3. Add the environment variables below. Public Vite values must be available during the build. All other API keys must be available to Functions, including scheduled functions. Give preview deploys separate non-production service credentials, or leave their live integrations disabled.
 4. Deploy. Changing a `VITE_` variable requires rebuilding the frontend. Redeploy after changing runtime secrets so the deployed functions receive the intended configuration.
-5. Set the final domain in Supabase's auth redirect configuration. Test a complete sign-in round trip and a link directly to a grant; the grant should remain behind authentication.
+5. Add the final domain to Supabase's auth redirect allowlist without replacing existing settings. Test a complete sign-in round trip and a link directly to a grant; the grant should remain behind authentication.
 
 ### Required environment variables
 
@@ -44,7 +48,7 @@ Row-level security is the boundary between organisations. One login can own mult
 | `VITE_SUPABASE_ANON_KEY`    | Browser/build  | Your project's public anon/publishable key                                               |
 | `SUPABASE_URL`              | Functions      | The same Project URL                                                                     |
 | `SUPABASE_ANON_KEY`         | Functions      | The same public anon/publishable key                                                     |
-| `SUPABASE_SERVICE_ROLE_KEY` | Functions only | Supabase service role key; privileged, never public                                      |
+| `SUPABASE_SERVICE_ROLE_KEY` | Functions only | Project-wide privileged service role/secret key; Functions only                          |
 | `GEMINI_API_KEY`            | Functions only | Gemini API key for a project with billing/quota and the required model access            |
 | `GEMINI_MODEL`              | Functions      | `gemini-flash-latest` by default; configurable model identifier                          |
 | `RESEND_API_KEY`            | Functions only | Resend API key with the required sending and receiving API access                        |
@@ -115,7 +119,7 @@ npm test
 npm run build
 ```
 
-Passing these checks validates the code and configured test cases. It does not prove that a new Supabase project has the migration installed, that email DNS is verified, or that live provider credentials work.
+Passing these checks validates the code and configured test cases. It does not prove that the hosted Supabase project has the dedicated schema installed/exposed, that email DNS is verified, or that live provider credentials work.
 
 ## 5. Launch verification
 
@@ -136,6 +140,6 @@ The portal drafts content for human review. Grant applications generally must st
 
 ## Current external prerequisites
 
-The repository can be built without production credentials. Live Supabase, Gemini and Resend integrations cannot be declared validated until you create/link the service projects, enter the environment variables, configure DNS and complete the staging checks above. Optional `EMAIL_AI_REPLIES=true` supports a narrow public-information email assistant. For short messages without attachments or financial keywords, Gemini selects only one of four intents: organisation name, ABN, grants or help. The server then builds a fixed reply using recorded name/ABN or current saved Google-source-backed grant titles, providers, source links and authenticated portal links. Imported/unverified grant records are excluded from these email summaries. No generated model prose or private organisation context is sent in the reply. This does not initiate a new web search per email. Other questions receive a portal handoff. If AI replies are disabled, `EMAIL_AUTO_ACK=true` enables only a fixed receipt; both responses are never sent for the same event. A matching email From address supports routing but is not strong proof of identity; email never authorises ledger changes, approvals or disclosure of private information.
+The repository can be built without production credentials. Live Supabase, Gemini and Resend integrations cannot be declared validated until the hosted installer is applied, `simple_grant` is added to the exposed schemas, the redirect is added, environment variables and DNS are configured, and the staging checks above pass. The shared project's existing Auth settings and other applications must also be checked for regressions. Optional `EMAIL_AI_REPLIES=true` supports a narrow public-information email assistant. For short messages without attachments or financial keywords, Gemini selects only one of four intents: organisation name, ABN, grants or help. The server then builds a fixed reply using recorded name/ABN or current saved Google-source-backed grant titles, providers, source links and authenticated portal links. Imported/unverified grant records are excluded from these email summaries. No generated model prose or private organisation context is sent in the reply. This does not initiate a new web search per email. Other questions receive a portal handoff. If AI replies are disabled, `EMAIL_AUTO_ACK=true` enables only a fixed receipt; both responses are never sent for the same event. A matching email From address supports routing but is not strong proof of identity; email never authorises ledger changes, approvals or disclosure of private information.
 
 Source-research network access in the build environment may also need the official Australian domains listed in `docs/AUSTRALIAN_GRANTS_RESEARCH.md`; that is separate from Netlify's deployment configuration.

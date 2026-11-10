@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit",
     "test:browser": "playwright test",
     "test:db": "bash supabase/tests/run-local.sh",
-    "format": "prettier --write src netlify tests docs *.ts *.json README.md"
+    "format": "prettier --write src netlify tests docs *.ts *.json README.md",
+    "db:bundle": "node supabase/build-installer.mjs",
+    "db:check": "node supabase/build-installer.mjs --check"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",

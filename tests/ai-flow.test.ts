@@ -142,6 +142,11 @@ describe("AI handler authentication and required input flow", () => {
   it("denies a viewer mutation before model access", async () => {
     member = { role: "viewer" };
     expect((await call()).status).toBe(403);
+    expect(mocks.createClient).toHaveBeenCalledWith(
+      "https://example.supabase.co",
+      "public-test-key",
+      expect.objectContaining({ db: { schema: "simple_grant" } }),
+    );
     expect(mocks.generateJSON).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
   });

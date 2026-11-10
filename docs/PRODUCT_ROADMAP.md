@@ -2,11 +2,11 @@
 
 Simple Grant should help a small Australian organisation move from finding an opportunity to producing its final report. Its first release is an assisted workspace. An authorised person remains responsible for factual approval, grant declarations, submission and reporting.
 
-See `AUSTRALIAN_GRANTS_RESEARCH.md` for the Australian requirements and source links, and `DEPLOYMENT.md` for the live service configuration. The presence of integration code does not mean provider accounts, DNS or production credentials have been configured.
+See `AUSTRALIAN_GRANTS_RESEARCH.md` for the Australian requirements and source links, and `DEPLOYMENT.md` for the live service configuration. The presence of integration code does not mean provider accounts, DNS or production credentials have been configured. For a shared Supabase project, apply the reviewed single-transaction installer, append the exposed schema and add the application redirect while preserving all existing project-wide Auth settings. Legacy public-schema Simple Grant data requires a separate reviewed migration; it is not moved automatically.
 
 ## First-release scope
 
-- A single login with several organisation workspaces, private documents, and membership-based database access.
+- A single login with several organisation workspaces, private documents, and membership-based database access. Shared Supabase projects use a dedicated `simple_grant` schema and `simple-grant-documents` bucket without changing other applications' public tables or migration history.
 - Organisation setup from supplied documents and pasted history, with extraction, source checking and correction before human approval.
 - Separate places for available opportunities, applications in preparation, and funded projects.
 - AI-assisted grant discovery using grounded search, and import from supplied program material. Source pages, dates and eligibility still need review; discovered opportunities have no invented match score and require supplied official guidelines before drafting.
