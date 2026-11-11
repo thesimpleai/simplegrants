@@ -407,7 +407,7 @@ describe("bounded AI failures", () => {
     expect(mocks.generateContent).not.toHaveBeenCalled();
     expect(mocks.write).not.toHaveBeenCalled();
   });
-  it("aborts a stalled model after18s and discards any late result", async () => {
+  it("aborts a stalled model after25s and discards any late result", async () => {
     vi.useFakeTimers();
     let release: (value: unknown) => void = () => {};
     mocks.generateContent.mockImplementationOnce(
@@ -417,7 +417,7 @@ describe("bounded AI failures", () => {
         }),
     );
     const pending = call({ profileStage: "extract" });
-    await vi.advanceTimersByTimeAsync(18000);
+    await vi.advanceTimersByTimeAsync(25000);
     const response = await pending;
     expect(response.status).toBe(504);
     expect((await response.json()).code).toBe("SG_AI_TIMEOUT");
@@ -464,63 +464,5 @@ describe("bounded AI failures", () => {
     expect(response.status).toBe(502);
     expect(body.code).toBe("SG_AI_RESPONSE");
     expect(JSON.stringify(body)).not.toContain("not-json-private-content");
-  });
-  it("does not continue a two-pass discovery to database writes after its request budget expires", async () => {
-    vi.useFakeTimers();
-    mocks.generateContent.mockImplementationOnce(
-      () =>
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                text: "Current search",
-                candidates: [
-                  {
-                    groundingMetadata: {
-                      groundingChunks: [
-                        {
-                          web: {
-                            uri: "https://www.grants.gov.au/source",
-                            title: "Source",
-                          },
-                        },
-                      ],
-                    },
-                  },
-                ],
-              }),
-            15000,
-          ),
-        ),
-    );
-    let release: (value: unknown) => void = () => {};
-    mocks.generateContent.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const pending = call({ action: "discover" });
-    await vi.advanceTimersByTimeAsync(27000);
-    const response = await pending;
-    expect(response.status).toBe(504);
-    expect((await response.json()).code).toBe("SG_AI_TIMEOUT");
-    release({
-      text: JSON.stringify({
-        opportunities: [
-          {
-            title: "Late grant",
-            funder: "Funder",
-            summary: "Late",
-            source_index: 0,
-          },
-        ],
-      }),
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(
-      mocks.from.mock.calls.some(([table]) => table === "opportunities"),
-    ).toBe(false);
-    expect(mocks.write).not.toHaveBeenCalled();
   });
 });

@@ -25,6 +25,37 @@ import {
 } from "../components/ui";
 import type { InboxMessage } from "../types";
 
+function confirmedInboundDomain(): string | null {
+  if (import.meta.env.VITE_INBOUND_EMAIL_ENABLED !== "true") return null;
+  const configuredDomain: unknown = import.meta.env.VITE_INBOUND_EMAIL_DOMAIN;
+  if (typeof configuredDomain !== "string") return null;
+  const domain = configuredDomain.trim().toLowerCase();
+  const labels = domain.split(".");
+  if (
+    !domain ||
+    domain.length > 253 ||
+    labels.length < 2 ||
+    labels.some(
+      (label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
+    ) ||
+    !/[a-z]/.test(labels.at(-1) ?? "") ||
+    /replace-?me|placeholder|your-?domain|your-?verified-?receiving-?domain/.test(
+      domain,
+    ) ||
+    [
+      "example.com",
+      "example.net",
+      "example.org",
+      "example",
+      "invalid",
+      "test",
+      "localhost",
+    ].some((suffix) => domain === suffix || domain.endsWith(`.${suffix}`))
+  )
+    return null;
+  return domain;
+}
+
 export default function InboxPage() {
   const app = useApp();
   const [tab, setTab] = useState("all");
@@ -37,9 +68,10 @@ export default function InboxPage() {
   const [ask, setAsk] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
-  const domain =
-    import.meta.env.VITE_INBOUND_EMAIL_DOMAIN || "mail.thesimpleai.com";
-  const inboxAddress = app.org ? `${app.org.inbox_alias}@${domain}` : "";
+  const domain = confirmedInboundDomain();
+  const inboxAddress =
+    app.org && domain ? `${app.org.inbox_alias}@${domain}` : "";
+  const emailReady = Boolean(inboxAddress);
   const pending = app.data.messages.filter(
     (message) => !["reviewed", "archived"].includes(message.status),
   );
@@ -58,6 +90,7 @@ export default function InboxPage() {
     setAsk(false);
   }, [app.org?.id]);
   async function copyAddress() {
+    if (!inboxAddress) return;
     try {
       await navigator.clipboard.writeText(inboxAddress);
       setCopied(true);
@@ -118,7 +151,9 @@ export default function InboxPage() {
           <p className="eyebrow">YOUR INBOX</p>
           <h1 className="page-title">A simple email goes a long way.</h1>
           <p className="page-subtitle">
-            Forward updates and invoices. Keep the story of your work together.
+            {emailReady
+              ? "Forward updates and invoices. Keep the story of your work together."
+              : "Review saved messages and keep new documents together in your portal."}
           </p>
         </div>
         <button
@@ -142,40 +177,67 @@ export default function InboxPage() {
         <EmptyState
           icon={<Inbox size={38} />}
           title="An inbox for each organisation"
-          description="Add your organisation first to get its own email address and keep its updates together."
+          description="Add your organisation to keep its documents and updates together."
         />
       ) : (
         <>
-          <section className="card inbox-address-card">
-            <span className="icon-tile">
-              <Mail size={25} />
-            </span>
-            <div className="inbox-address-content">
-              <p className="eyebrow">YOUR ORGANISATION’S EMAIL ADDRESS</p>
-              <strong className="inbox-address">{inboxAddress}</strong>
-              <p className="muted">
-                Forward messages from your signed-in email address. Add the
-                project name to help you find them later.
-              </p>
-            </div>
-            <button className="button secondary" onClick={copyAddress}>
-              {copied ? <Check size={17} /> : <Copy size={17} />}{" "}
-              {copied ? "Copied" : "Copy address"}
-            </button>
-          </section>
-          <div className="inbox-explainer grid-2">
-            <div className="inline-heading">
+          {emailReady ? (
+            <section className="card inbox-address-card">
               <span className="icon-tile">
-                <ArrowDownToLine size={21} />
+                <Mail size={25} />
               </span>
-              <div>
-                <h3>Forward it. Find it here.</h3>
-                <p className="muted small">
-                  Invoices, grant updates and evidence arrive ready for your
-                  review.
+              <div className="inbox-address-content">
+                <p className="eyebrow">YOUR ORGANISATION’S EMAIL ADDRESS</p>
+                <strong className="inbox-address">{inboxAddress}</strong>
+                <p className="muted">
+                  Forward messages from your signed-in email address. Add the
+                  project name to help you find them later.
                 </p>
               </div>
-            </div>
+              <button className="button secondary" onClick={copyAddress}>
+                {copied ? <Check size={17} /> : <Copy size={17} />}{" "}
+                {copied ? "Copied" : "Copy address"}
+              </button>
+            </section>
+          ) : (
+            <section
+              className="card inbox-address-card"
+              aria-labelledby="email-intake-status"
+            >
+              <span className="icon-tile">
+                <Mail size={25} />
+              </span>
+              <div className="inbox-address-content">
+                <p className="eyebrow">EMAIL INTAKE</p>
+                <h2 id="email-intake-status">Email intake is not ready yet.</h2>
+                <p className="muted">
+                  You can still review saved messages. Upload new documents in
+                  the portal while email intake is being set up.
+                </p>
+              </div>
+              <a
+                className="button secondary"
+                href={`/?org=${encodeURIComponent(app.org.id)}&view=organisation`}
+              >
+                Upload documents in the portal
+              </a>
+            </section>
+          )}
+          <div className="inbox-explainer grid-2">
+            {emailReady && (
+              <div className="inline-heading">
+                <span className="icon-tile">
+                  <ArrowDownToLine size={21} />
+                </span>
+                <div>
+                  <h3>Forward it. Find it here.</h3>
+                  <p className="muted small">
+                    Invoices, grant updates and evidence arrive ready for your
+                    review.
+                  </p>
+                </div>
+              </div>
+            )}
             <div className="inline-heading">
               <span className="icon-tile">
                 <ShieldCheck size={21} />
@@ -233,14 +295,16 @@ export default function InboxPage() {
                     ? "No messages match your search"
                     : tab === "review"
                       ? "You’re all caught up"
-                      : "Your inbox is ready"
+                      : "No messages yet"
                 }
                 description={
                   search
                     ? "Try another name, word or email address."
                     : tab === "review"
                       ? "New messages will appear here when they need your attention."
-                      : "Forward an update or invoice to your organisation’s email address. It will appear here once your email service is connected."
+                      : emailReady
+                        ? "Forward an update or invoice from your signed-in email address. It will appear here for review."
+                        : "Upload new documents in the portal. Saved messages will remain available here."
                 }
               />
             ) : (

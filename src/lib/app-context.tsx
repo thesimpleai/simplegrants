@@ -16,6 +16,7 @@ import type {
   Profile,
   ProfileStage,
   ReviewCheck,
+  UploadBatchResult,
 } from "../types";
 import type { AppContextValue } from "./contracts";
 import { configured, supabase } from "./supabase";
@@ -31,6 +32,29 @@ import {
 import { signOutFromSimpleGrant } from "./auth-session";
 import { safeAuthReturnPath } from "./auth-links";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
+function organisationPreferenceKey(userId: string) {
+  let project = configured ? "connected-project" : "demo";
+  try {
+    project = new URL(import.meta.env.VITE_SUPABASE_URL).host.toLowerCase();
+  } catch {
+    /* Browser tests and demo mode may have no project URL. */
+  }
+  return `simple-grants-last-org-v1:${project}:${userId}`;
+}
+function readOrganisationPreference(userId: string): string | null {
+  try {
+    return localStorage.getItem(organisationPreferenceKey(userId));
+  } catch {
+    return null;
+  }
+}
+function saveOrganisationPreference(userId: string, id: string) {
+  try {
+    localStorage.setItem(organisationPreferenceKey(userId), id);
+  } catch {
+    /* Preferences must not block access if storage is disabled. */
+  }
+}
 const empty: OrgData = {
   documents: [],
   opportunities: [],
@@ -45,10 +69,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [organisations, setOrganisations] = useState<Organisation[]>(
       configured ? [] : [demoOrg, demoOrgTwo],
     ),
-    [orgId, setOrgId] = useState(configured ? "" : demoOrg.id),
-    [data, setData] = useState<OrgData>(
-      configured ? empty : demoData(demoOrg.id),
+    [orgId, setOrgId] = useState(() =>
+      configured
+        ? ""
+        : ([demoOrg, demoOrgTwo].find(
+            (item) =>
+              item.id ===
+              new URLSearchParams(window.location.search).get("org"),
+          )?.id ??
+          [demoOrg, demoOrgTwo].find(
+            (item) => item.id === readOrganisationPreference("demo"),
+          )?.id ??
+          demoOrg.id),
     ),
+    [data, setData] = useState<OrgData>(configured ? empty : demoData(orgId)),
     [loading, setLoading] = useState(configured),
     [connectionError, setConnectionError] = useState<string | null>(null),
     [organisationsLoaded, setOrganisationsLoaded] = useState(!configured),
@@ -178,17 +212,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!Array.isArray(rows))
         throw new Error("The workspace response could not be read.");
       setOrganisations(rows);
-      setOrgId((previous) =>
-        rows.some((item) => item.id === previous)
-          ? previous
-          : (rows.find(
-              (item) =>
-                item.id ===
-                new URLSearchParams(window.location.search).get("org"),
-            )?.id ??
-            rows[0]?.id ??
-            ""),
-      );
+      const requested = new URLSearchParams(window.location.search).get("org");
+      const remembered = readOrganisationPreference(userId);
+      const chosen =
+        rows.find((item) => item.id === requested)?.id ??
+        rows.find((item) => item.id === activeOrg.current)?.id ??
+        rows.find((item) => item.id === remembered)?.id ??
+        rows[0]?.id ??
+        "";
+      activeOrg.current = chosen;
+      setOrgId(chosen);
+      if (chosen) {
+        saveOrganisationPreference(userId, chosen);
+        const params = new URLSearchParams(window.location.search);
+        params.set("org", chosen);
+        window.history.replaceState(
+          {},
+          "",
+          `${window.location.pathname}?${params}`,
+        );
+      }
       markOrganisationsLoaded(true);
       clearConnectionError();
     } catch (error) {
@@ -311,6 +354,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       retryPending.current = false;
     }
   }
+  function chooseOrganisation(id: string) {
+    activeOrg.current = id;
+    setOrgId(id);
+    const identity = currentUserId.current ?? (configured ? null : "demo");
+    if (identity) saveOrganisationPreference(identity, id);
+    const params = new URLSearchParams(window.location.search);
+    params.set("org", id);
+    params.delete("grant");
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}?${params}`,
+    );
+  }
   async function createOrg(name: string, frequency: Frequency) {
     if (!name.trim()) throw new Error("Please enter an organisation name.");
     if (
@@ -331,14 +388,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const o = Array.isArray(data) ? data[0] : data;
       if (!o) throw new Error("The organisation could not be created.");
       setOrganisations((a) => [...a, o]);
-      setOrgId(o.id);
+      chooseOrganisation(o.id);
     } else {
       const id = crypto.randomUUID();
       const o: Organisation = {
         id,
         name: name.trim(),
         abn: null,
-        type: "Community organisation",
+        type: "",
         state: "VIC",
         description: "",
         focus_areas: [],
@@ -348,7 +405,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         inbox_alias: `demo-${id.slice(0, 8)}`,
       };
       setOrganisations((a) => [...a, o]);
-      setOrgId(id);
+      chooseOrganisation(id);
     }
     notify("Organisation created. Add your documents to get started.");
   }
@@ -366,22 +423,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     );
     notify("Organisation details saved.");
   }
-  async function uploadDocuments(files: File[], category: string) {
+  async function uploadDocuments(
+    files: File[],
+    category: string,
+  ): Promise<UploadBatchResult> {
     if (!org) throw new Error("Choose an organisation first.");
     if (!supabase)
       throw new Error(
         "File storage is available after connecting Supabase. This demo does not store your documents.",
       );
-    if (!files.length) return;
+    const result: UploadBatchResult = { saved: [], failed: [], skipped: [] };
+    if (!files.length) return result;
     if (files.length > MAX_UPLOAD_FILES)
       throw new Error(
         `Please upload up to ${MAX_UPLOAD_FILES} files at a time.`,
       );
-    // Validate the complete batch before storing any files. Browser MIME values
-    // can be empty, so resolve the recognised extension and MIME together.
+    // Every file is validated before any upload, including files later skipped as duplicates.
     const prepared = files.map((file) => {
       const format = resolveDocumentFormat(file);
-      if (!format) throw new Error(unsupportedDocumentMessage(file.name));
+      if (!format)
+        throw new Error(
+          `${file.name}: ${unsupportedDocumentMessage(file.name)}`,
+        );
       if (file.size > MAX_DOCUMENT_BYTES)
         throw new Error(
           `${file.name} is too large. Maximum file size is 10 MB.`,
@@ -390,73 +453,111 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
     const targetOrg = org.id;
     const targetUser = currentUserId.current;
-    let saved = 0;
-    let uploadError: unknown = null;
-    try {
-      for (const { file, format } of prepared) {
-        if (
-          activeOrg.current !== targetOrg ||
-          currentUserId.current !== targetUser
-        )
-          throw new Error("organisation_changed");
-        const path = `${targetOrg}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-        const { error } = await supabase.storage
+    const isCurrent = () =>
+      activeOrg.current === targetOrg && currentUserId.current === targetUser;
+    const key = (name: string, size: number, mime: string) =>
+      JSON.stringify([name.normalize("NFC"), size, mime]);
+    const existing = new Set(
+      data.documents
+        .filter((document) => document.org_id === targetOrg)
+        .map((document) =>
+          key(
+            document.name,
+            document.size_bytes,
+            resolveDocumentFormat({
+              name: document.name,
+              type: document.mime_type,
+            })?.mimeType ??
+              document.mime_type.split(";")[0].trim().toLowerCase(),
+          ),
+        ),
+    );
+    const selected = new Set<string>();
+    const queue = prepared.filter(({ file, format }) => {
+      const identity = key(file.name, file.size, format.mimeType);
+      const reason = existing.has(identity)
+        ? "Same name, size and type already in your library."
+        : selected.has(identity)
+          ? "Same name, size and type already selected in this batch."
+          : "";
+      selected.add(identity);
+      if (reason) {
+        result.skipped.push({ name: file.name, reason });
+        return false;
+      }
+      return true;
+    });
+    for (let index = 0; index < queue.length; index++) {
+      const { file, format } = queue[index];
+      if (!isCurrent()) {
+        result.skipped.push(
+          ...queue
+            .slice(index)
+            .map((item) => ({
+              name: item.file.name,
+              reason:
+                "Organisation or sign-in changed before this file was uploaded.",
+            })),
+        );
+        break;
+      }
+      const path = `${targetOrg}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      let stored = false;
+      try {
+        const uploaded = await supabase.storage
           .from(DOCUMENT_BUCKET)
           .upload(path, file, { contentType: format.mimeType });
-        if (error) throw error;
-        const result = await supabase.from("documents").insert({
-          org_id: targetOrg,
-          name: file.name,
-          category,
-          storage_path: path,
-          mime_type: format.mimeType,
-          size_bytes: file.size,
-          verified: false,
-        });
-        if (result.error) {
-          await supabase.storage.from(DOCUMENT_BUCKET).remove([path]);
-          throw result.error;
+        if (uploaded.error) throw uploaded.error;
+        stored = true;
+        if (!isCurrent()) throw new Error("organisation_changed");
+        const saved = await supabase
+          .from("documents")
+          .insert({
+            org_id: targetOrg,
+            name: file.name,
+            category,
+            storage_path: path,
+            mime_type: format.mimeType,
+            size_bytes: file.size,
+            verified: false,
+          });
+        if (saved.error) throw saved.error;
+        result.saved.push(file.name);
+      } catch (error) {
+        if (stored) {
+          try {
+            await supabase.storage.from(DOCUMENT_BUCKET).remove([path]);
+          } catch {
+            /* A failed cleanup must not stop the remaining batch. */
+          }
         }
-        saved++;
+        const message =
+          error &&
+          typeof error === "object" &&
+          "message" in error &&
+          typeof error.message === "string"
+            ? error.message
+            : "";
+        const reason = /organisation_changed/.test(message)
+          ? "Upload interrupted because the organisation or sign-in changed."
+          : /mime|content.?type|unsupported|file type/i.test(message)
+            ? "Your document library needs an update to accept this file type. Please contact support."
+            : "Could not upload this file. Check your connection and try this file again.";
+        result.failed.push({ name: file.name, reason });
       }
-    } catch (error) {
-      uploadError = error;
     }
-    // Even a partial batch must become visible so retrying does not duplicate
-    // files that were already saved. refresh keeps its own persistent error.
-    if (
-      saved &&
-      activeOrg.current === targetOrg &&
-      currentUserId.current === targetUser
-    ) {
+    if (result.saved.length && isCurrent()) {
       try {
         await refresh();
       } catch {
-        /* The workspace connection card provides a separate retry. */
+        /* The workspace connection card retries loading saved records. */
       }
     }
-    if (uploadError) {
-      const detail =
-        uploadError && typeof uploadError === "object"
-          ? (uploadError as { message?: unknown })
-          : {};
-      const message = typeof detail.message === "string" ? detail.message : "";
-      const explanation = /organisation_changed/.test(message)
-        ? "Your selected organisation changed. Return to the original organisation to check its files."
-        : /mime|content.?type|unsupported|file type/i.test(message)
-          ? "Your document library needs an update before it can accept this file type. Please contact support."
-          : "We couldn’t finish uploading your documents. Check your connection and try again.";
-      throw new Error(
-        `${saved ? `${saved} document${saved === 1 ? " was" : "s were"} saved. Check your library before uploading again. ` : ""}${explanation}`,
+    if (isCurrent())
+      notify(
+        `${result.saved.length} saved · ${result.failed.length} failed · ${result.skipped.length} skipped. Review the upload results.`,
       );
-    }
-    if (activeOrg.current !== targetOrg || currentUserId.current !== targetUser)
-      throw new Error(
-        "Your selected organisation changed. Your uploaded files remain in the original organisation’s library.",
-      );
-    notify(
-      `${saved} document${saved === 1 ? "" : "s"} uploaded. Ready for review.`,
-    );
+    return result;
   }
   async function removeDocument(id: string) {
     const doc = data.documents.find((d) => d.id === id);
@@ -730,7 +831,104 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ensureCurrent();
       return corrected as AIResult;
     }
-    const result = await requestAI();
+    const isReceipt = (result: Record<string, unknown>) =>
+      typeof result.sourceFingerprint === "string" &&
+      /^[0-9a-f]{64}$/i.test(result.sourceFingerprint) &&
+      typeof result.stageIssuedAt === "number" &&
+      Number.isSafeInteger(result.stageIssuedAt) &&
+      result.stageIssuedAt > 0;
+    const isSources = (value: unknown) =>
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.length <= 20 &&
+      value.every((source) => {
+        if (
+          !isRecord(source) ||
+          typeof source.title !== "string" ||
+          source.title.length > 1000 ||
+          typeof source.uri !== "string" ||
+          source.uri.length > 3000
+        )
+          return false;
+        try {
+          const url = new URL(source.uri);
+          return url.protocol === "https:" && !url.username && !url.password;
+        } catch {
+          return false;
+        }
+      });
+    const isSearchDraft = (value: unknown) =>
+      isRecord(value) &&
+      typeof value.summary === "string" &&
+      value.summary.length > 0 &&
+      value.summary.length <= 30000 &&
+      isSources(value.sources);
+    const isRequirement = (value: unknown) =>
+      isRecord(value) &&
+      typeof value.label === "string" &&
+      value.label.length > 0 &&
+      value.label.length <= 300 &&
+      typeof value.source_quote === "string" &&
+      value.source_quote.length >= 12 &&
+      value.source_quote.length <= 2500 &&
+      typeof value.mandatory === "boolean" &&
+      typeof value.conditional === "boolean" &&
+      (typeof value.condition_applies === "boolean" ||
+        value.condition_applies === null);
+    const isDraftRequirements = (value: unknown) =>
+      isRecord(value) &&
+      Array.isArray(value.documents) &&
+      value.documents.length <= 40 &&
+      Array.isArray(value.information) &&
+      value.information.length <= 40 &&
+      value.documents.every(
+        (item) =>
+          isRequirement(item) &&
+          isRecord(item) &&
+          [
+            "financial_statement",
+            "audit_report",
+            "insurance",
+            "registration",
+            "acnc",
+            "other",
+          ].includes(String(item.category)),
+      ) &&
+      value.information.every(
+        (item) =>
+          isRequirement(item) &&
+          isRecord(item) &&
+          ["budget", "summary", "other"].includes(String(item.field)) &&
+          typeof item.critical === "boolean" &&
+          typeof item.missing === "boolean",
+      );
+    let result: Record<string, unknown>;
+    if (original.action === "discover") {
+      const searched = await requestAI({ discoveryStage: "search" });
+      if (!isReceipt(searched) || !isSearchDraft(searched.searchDraft))
+        throw failure();
+      ensureCurrent();
+      result = await requestAI({
+        discoveryStage: "extract",
+        searchDraft: searched.searchDraft,
+        sourceFingerprint: searched.sourceFingerprint,
+        stageIssuedAt: searched.stageIssuedAt,
+      });
+    } else if (original.action === "draft") {
+      const checked = await requestAI({ draftStage: "preflight" });
+      if (
+        !isReceipt(checked) ||
+        !isDraftRequirements(checked.draftRequirements)
+      )
+        throw failure();
+      ensureCurrent();
+      result = await requestAI({
+        draftStage: "generate",
+        draftRequirements: checked.draftRequirements,
+        sourceFingerprint: checked.sourceFingerprint,
+        stageIssuedAt: checked.stageIssuedAt,
+      });
+    } else result = await requestAI();
     const valid =
       original.action === "discover" || original.action === "import-grant"
         ? Array.isArray(result.opportunities)
@@ -1043,11 +1241,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         toast,
         notify,
         selectOrg: (id: string) => {
-          setOrgId(id);
-          const params = new URLSearchParams(window.location.search);
-          params.set("org", id);
-          params.delete("grant");
-          window.history.replaceState({}, "", `?${params}`);
+          if (organisations.some((item) => item.id === id))
+            chooseOrganisation(id);
         },
         signIn,
         signOut,

@@ -114,9 +114,31 @@ The shared document policy now supports DOCX/XLSX and additional text formats al
 
 These are local tests with mocked model/provider calls and disposable PostgreSQL. Migration 006 has been prepared for the existing hosted project but was not applied from this executor. Netlify's deployed revision, real Gemini responses and hosted Office uploads remain unverified; the running task's network policy still blocks those application destinations.
 
-## Not yet validated
+## Live-QA remediation (11 November 2026)
 
-At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.
+The user supplied a live QA report for deployed revision `6a25e88`. It observed working branded authentication, one complete three-stage profile with source contradictions, record persistence, manual grant/project tracking and anonymous-access denial. It also observed the original five-type bucket allowlist, intermittent AI failures around the 18-second model window, two model-response validation failures, and a failed receiving-domain delivery. Those are supplied live observations of that baseline, not results from this executor. Missing shared CLI migration-history entries alone do not establish SQL Editor migration state; the actual bucket allowlist establishes that expanded upload types were unavailable.
+
+The remediation separates remaining hosted configuration from code changes:
+
+- Existing installations use the atomic, repeatable `supabase/upgrade-qa.sql` (unchanged 006 plus new 007). It enables expanded MIME types and changes only the default for future organisation types to unknown. Existing organisation values and evidence remain intact. Applying this hosted upgrade is still required.
+- Discovery and application drafting now have two authenticated, quota-counted phases, each making at most one model request. Signed 15-minute continuation receipts bind the user, organisation, intermediate state and current original evidence. Profile preparation remains three requests. The model window is up to 25 seconds within the 27-second request budget; model JSON schemas, nullable optional fact handling and fixed private failure reasons address the observed latency/output failure classes. This is a tested mitigation, not proof of live reliability.
+- Explicit mandatory insurance in original guidelines blocks drafting before model access; optional, negated and unresolved conditional clauses are not made universal requirements. Final draft writes use an optimistic application version/status guard, preserving concurrent manual edits or submissions.
+- Uploads report named saved/failed/skipped files and continue after individual storage failures. Possible duplicates are skipped using name, byte length and normalised MIME, with the heuristic stated; this is not server-side content-hash deduplication.
+- Source badges distinguish imports, added links and grounded citations. Grant selections are in the URL and retained through sign-in. Organisation selection is persisted per user/project, search state resets on change, menus dismiss correctly, and unknown types remain unknown. Manual submission requires explicit acknowledgement plus a reference or a no-reference acknowledgement.
+- Inbox addresses are hidden unless a strict build flag and valid configured hostname are supplied. The flag is administrator confirmation, not DNS verification. Receiving DNS/MX, webhook processing and a controlled delivery test still need external configuration before enabling the address.
+
+Final local checks for this remediation:
+
+- `npm test`: **186 of 186 tests passed across fourteen files**.
+- `npm run test:browser`: **68 of 68 workflows passed** in 37.5 seconds, including the new staged grant, inbox-readiness and upload/workspace regressions.
+- `npm run build` passed TypeScript and the production Vite build. `npm run db:check` verified both the seven-baseline installer and targeted QA upgrade against their sources.
+- `npm run test:db`: **six scenarios passed**, including fresh seven-baseline installs, exact supplied storage rules, prior upgrade paths, 005-to-006/007 and an already-006 installation. Atomic rollback, repeatability, existing types/evidence and shared-project permissions were verified.
+- All four Function bundles loaded on **Node 22.23.4**. Three GET guards returned 405, the packaged Office converter read genuine generated DOCX/XLSX fixtures, and the digest handler was imported without invocation. No provider or outgoing email calls were made.
+- Independent review found no remaining concrete blocker in the changed source, including receipt forgery boundaries, private diagnostics and concurrent draft protection.
+
+## Remaining live verification
+
+The supplied QA establishes several working hosted flows on `6a25e88`, as described above. The current remediation has local validation only. Its Netlify deployment, hosted 006/007 upgrade, Office upload/AI reading, improved real Gemini completion rate and receiving-domain repair have not been verified by this executor. Cross-account isolation, controlled digest delivery and the previously blocked browser cases still require their stated accounts/tools. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; local model calls use mocks and do not substitute for those live tests.
 
 Official Australian government research pages were blocked by the cloud network policy. The research document marks its primary-source links and current-law verification status accordingly. Do not treat its background thresholds as a live legal determination.
 

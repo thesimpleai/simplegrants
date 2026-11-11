@@ -9,7 +9,7 @@ The demonstration mode works without service keys and contains fictional records
 Simple Grant can use an existing Supabase project shared with other applications. Its tables and RPCs live in the dedicated `simple_grant` schema, and its private Storage bucket is `simple-grant-documents`. These names are fixed in the application; no extra schema or bucket environment variables are needed. Existing `public` tables and other applications' migration history must remain untouched.
 
 1. Open the intended Supabase project and record its **Project URL** and public anon/publishable key. Use this same project's URL and public key in both corresponding browser and server settings below. Obtain the privileged service role/secret key for Functions only. The service key is privileged across the **entire shared project**, even though this application's code targets its own schema; never put it in the browser or chat.
-2. Review **`supabase/install-simple-grant.sql`**. For a fresh installation, this is the combined installer for the six baseline migrations, wrapped in **one transaction**. In that project's **SQL Editor**, paste and run the complete installer once. It creates Simple Grant's schema, tenant policies, private bucket, shared portal/email AI quota and saved report-draft field. No seed data is required. Run the complete file; do not apply fragments after an error. If 001–005 are already installed, apply only `supabase/migrations/202611100006_document_formats.sql` for the supported-document bucket MIME upgrade. If the installation stops at 004, apply 005 then 006 in order. Never repeat installed baselines or rerun the initial installer over an existing installation.
+2. Review **`supabase/install-simple-grant.sql`**. For a fresh installation, this is the combined installer for the seven baseline migrations, wrapped in **one transaction**. In that project's **SQL Editor**, paste and run the complete installer once. It creates Simple Grant's schema, tenant policies, private bucket, shared portal/email AI quota and saved report-draft field. No seed data is required. Run the complete file; do not apply fragments after an error. Existing installations through 005 or 006 use `supabase/upgrade-qa.sql`, which applies unchanged 006 plus the additive 007 in one idempotent transaction. It extends the dedicated document MIME list and sets only future organisation types to unknown; existing values remain intact. If the installation stops at 004, apply 005 before the QA upgrade. Never repeat installed baselines or rerun the initial installer over an existing installation.
 3. In **Settings → Data API / API → Exposed schemas**, **append `simple_grant`** to the existing list and save. Preserve every existing exposed schema. This step makes the new schema available through Supabase's REST API; creating tables alone does not expose it. If the API schema cache needs refreshing, the safe SQL notification is:
 
    ```sql
@@ -37,58 +37,53 @@ Row-level security separates organisations within Simple Grant. One login can ow
 1. In Netlify, connect `thesimpleai/simplegrants` and use `main` as the production branch.
 2. Use the repository's `netlify.toml`: Node 22, build command `npm run build`, publish directory `dist`, and functions directory `netlify/functions`.
 3. Add the environment variables below. Public Vite values must be available during the build. All other API keys must be available to Functions, including scheduled functions. Give preview deploys separate non-production service credentials, or leave their live integrations disabled.
-4. Before production rollout, complete [Authentication](AUTHENTICATION.md): working HTTPS on `https://simplegrants.com.au`, the required migrations through 006, the four login settings and verified Resend login sender. Verify these prerequisites for the deployment environment and skip migrations that are already installed. Local tests do not establish provider configuration or real delivery. Default preview origins intentionally cannot exercise the production login route.
+4. Before production rollout, complete [Authentication](AUTHENTICATION.md): working HTTPS on `https://simplegrants.com.au`, the required migrations through 007, the four login settings and verified Resend login sender. Verify these prerequisites for the deployment environment and skip migrations that are already installed. Local tests do not establish provider configuration or real delivery. Default preview origins intentionally cannot exercise the production login route.
 5. Deploy the current `main` revision and wait for the Netlify production deployment to complete. A source push alone does not establish the live revision. Changing a `VITE_` variable requires rebuilding the frontend; redeploy after runtime secret changes. Request a fresh application-specific email and test sign-in and a protected grant deep link on the canonical domain. Old native Supabase links are not consumed after rollout. Leave the shared Supabase global Auth configuration unchanged.
 
 ### Required environment variables
 
-| Variable                    | Used by        | Value                                                                                    |
-| --------------------------- | -------------- | ---------------------------------------------------------------------------------------- |
-| `VITE_SUPABASE_URL`         | Browser/build  | Your Supabase Project URL                                                                |
-| `VITE_SUPABASE_ANON_KEY`    | Browser/build  | Your project's public anon/publishable key                                               |
-| `SUPABASE_URL`              | Functions      | The same Project URL                                                                     |
-| `SUPABASE_ANON_KEY`         | Functions      | The same public anon/publishable key                                                     |
-| `SUPABASE_SERVICE_ROLE_KEY` | Functions only | Project-wide privileged service role/secret key; Functions only                          |
-| `GEMINI_API_KEY`            | Functions only | Gemini API key for a project with billing/quota and the required model access            |
-| `GEMINI_MODEL`              | Functions      | `gemini-flash-latest` by default; configurable model identifier                          |
-| `RESEND_API_KEY`            | Functions only | Resend API key with the required sending and receiving API access                        |
-| `RESEND_WEBHOOK_SECRET`     | Functions only | Signing secret of the receiving webhook, not the sending API key                         |
-| `EMAIL_AI_REPLIES`          | Functions      | Optional `false` default; enables tightly restricted public-information question replies |
-| `EMAIL_AUTO_ACK`            | Functions      | Optional `false` default; fixed public receipt used only when AI replies are disabled    |
-| `EMAIL_FROM`                | Functions      | A verified sender, e.g. `Simple Grant <grants@thesimpleai.com>`                          |
-| `INBOUND_EMAIL_DOMAIN`      | Functions      | Your configured receiving domain, e.g. `mail.thesimpleai.com`                            |
-| `VITE_INBOUND_EMAIL_DOMAIN` | Browser/build  | The same public receiving domain, used to show your organisation inbox address           |
-| `AUTH_APP_URL`              | Functions      | Canonical login origin: `https://simplegrants.com.au`                                    |
-| `AUTH_EMAIL_FROM`           | Functions      | Verified login sender: `Simple Grants <login@simplegrants.com.au>`                       |
-| `AUTH_ALLOW_SIGNUPS`        | Functions      | `false` default; `true` explicitly permits new shared Auth users                         |
-| `AUTH_RATE_LIMIT_SECRET`    | Functions only | Separate random HMAC secret; generate at least 32 random bytes                           |
-| `URL`                       | Functions      | Netlify supplies the site's canonical URL; used for grant-summary portal links           |
+| Variable                     | Used by        | Value                                                                                    |
+| ---------------------------- | -------------- | ---------------------------------------------------------------------------------------- |
+| `VITE_SUPABASE_URL`          | Browser/build  | Your Supabase Project URL                                                                |
+| `VITE_SUPABASE_ANON_KEY`     | Browser/build  | Your project's public anon/publishable key                                               |
+| `SUPABASE_URL`               | Functions      | The same Project URL                                                                     |
+| `SUPABASE_ANON_KEY`          | Functions      | The same public anon/publishable key                                                     |
+| `SUPABASE_SERVICE_ROLE_KEY`  | Functions only | Project-wide privileged service role/secret key; Functions only                          |
+| `GEMINI_API_KEY`             | Functions only | Gemini API key for a project with billing/quota and the required model access            |
+| `GEMINI_MODEL`               | Functions      | `gemini-flash-latest` by default; configurable model identifier                          |
+| `RESEND_API_KEY`             | Functions only | Resend API key with the required sending and receiving API access                        |
+| `RESEND_WEBHOOK_SECRET`      | Functions only | Signing secret of the receiving webhook, not the sending API key                         |
+| `EMAIL_AI_REPLIES`           | Functions      | Optional `false` default; enables tightly restricted public-information question replies |
+| `EMAIL_AUTO_ACK`             | Functions      | Optional `false` default; fixed public receipt used only when AI replies are disabled    |
+| `EMAIL_FROM`                 | Functions      | A verified sender, e.g. `Simple Grant <grants@thesimpleai.com>`                          |
+| `INBOUND_EMAIL_DOMAIN`       | Functions      | Actual receiving hostname; must match the frontend domain                                |
+| `VITE_INBOUND_EMAIL_DOMAIN`  | Browser/build  | Matching receiving hostname only; blank until configured                                 |
+| `VITE_INBOUND_EMAIL_ENABLED` | Browser/build  | `false` default; set `true` only after the receiving/DNS/webhook/test checks below       |
+| `AUTH_APP_URL`               | Functions      | Canonical login origin: `https://simplegrants.com.au`                                    |
+| `AUTH_EMAIL_FROM`            | Functions      | Verified login sender: `Simple Grants <login@simplegrants.com.au>`                       |
+| `AUTH_ALLOW_SIGNUPS`         | Functions      | `false` default; `true` explicitly permits new shared Auth users                         |
+| `AUTH_RATE_LIMIT_SECRET`     | Functions only | Separate random HMAC secret; generate at least 32 random bytes                           |
+| `URL`                        | Functions      | Netlify supplies the site's canonical URL; used for grant-summary portal links           |
 
 No Gemini key, Resend key or Supabase service role key should have a `VITE_` prefix. Vite bundles variables with that prefix into downloadable browser code.
 
 Create the Gemini key in your Google AI Studio/Google Cloud project and the Resend key in Resend. Enter both into Netlify; the Resend key does not belong in Gemini settings.
 
-The Flash alias can change its underlying model. Before launch, verify that the selected model supports the document formats and Google Search grounding this application uses. Pin `GEMINI_MODEL` to a tested stable Flash model if you need predictable behaviour and cost. Configure quota and budget limits in the provider account. The database also limits portal and eligible public-email AI requests to a shared 60 per user per UTC day across organisations; this is a request count, not a token or dollar cap. Profile preparation uses three separately authenticated requests, one for each extraction/check/correction stage. A completed preparation therefore claims three of the daily requests, and failed claimed stages still count. The interface retries by restarting all three stages from the preserved source selection; those new stages claim requests again. Scheduled discovery has separate consumption. This setup does not claim that a particular preview model is the latest supported production model.
+The Flash alias can change its underlying model. Before launch, verify that the selected model supports the document formats and Google Search grounding this application uses. Pin `GEMINI_MODEL` to a tested stable Flash model if you need predictable behaviour and cost. Configure quota and budget limits in the provider account. The database also limits portal and eligible public-email AI requests to a shared 60 per user per UTC day across organisations; this is a request count, not a token or dollar cap. Profile preparation uses three separately authenticated requests; discovery and application drafting each use two. Every successfully claimed phase consumes one of the daily requests, including a phase whose downstream work fails. Retry restarts that flow from its first phase with the preserved originals; those requests claim quota again. Scheduled discovery has separate consumption. This setup does not claim that a particular preview model is the latest supported production model.
 
 ## 3. Configure email and your domain
 
 Login emails use the separately verified `simplegrants.com.au` domain through `AUTH_EMAIL_FROM`; see [Authentication](AUTHENTICATION.md). Grant summaries/inbound evidence continue to use `EMAIL_FROM` and `INBOUND_EMAIL_DOMAIN`. Do not change existing mail routing to configure login sending.
 
-The original product brief mentions both `thesimpleai.com` and `simpleai.com.au`. Use the domain you actually own; the application does not assume they are interchangeable. The sample configuration uses `thesimpleai.com` for sending and `mail.thesimpleai.com` for receiving.
+Receiving setup is separate from login/sending-domain verification. Keep `VITE_INBOUND_EMAIL_ENABLED=false` until an administrator has completed the following checks. The application has no fallback receiving domain.
 
-1. Verify the sending domain in Resend by adding its specified DNS records, including the required SPF/DKIM records. Follow Resend's current instructions for DMARC and domain alignment.
-2. Enable receiving for a dedicated subdomain, such as `mail.thesimpleai.com`, and add Resend's prescribed MX records for that subdomain. A subdomain avoids replacing the MX records used by an existing staff mailbox. Do not change the apex domain's existing mail routing without reviewing its impact.
-3. Set `EMAIL_FROM`, `INBOUND_EMAIL_DOMAIN` and `VITE_INBOUND_EMAIL_DOMAIN` to the verified configuration. Organisations receive individual aliases under that domain. Keep the alias shown in the portal consistent with the configured receiving domain.
-4. In Resend, create an `email.received` webhook pointing to:
+1. Choose a subdomain you own for receiving. In **Resend Receiving**, enable that domain and publish the **exact MX target and priority Resend supplies** at that subdomain. Do not invent DNS values, replace the apex domain's existing MX records or disturb staff mail. Confirm the receiving hostname resolves and Resend shows receiving enabled; a verified sending domain alone is insufficient.
+2. Set the identical hostname, without URL scheme/path/port, in `INBOUND_EMAIL_DOMAIN` (Functions) and `VITE_INBOUND_EMAIL_DOMAIN` (Builds). The Resend API key must allow the receiving API used to fetch message content. Use your verified `EMAIL_FROM` separately for outbound summaries/receipts.
+3. Create an `email.received` webhook with the canonical endpoint **`https://simplegrants.com.au/.netlify/functions/inbound-email`**. Use the actual final canonical hostname if it differs. Avoid an old Netlify alias that redirects POSTs. Set its signing secret in `RESEND_WEBHOOK_SECRET` and deploy the function configuration.
+4. Before publishing an address to users, send a harmless controlled test from the verified email of a member of a clearly named test organisation. An authorised administrator can read that test organisation's stored `inbox_alias` and combine it with the receiving hostname for this private test. Confirm provider delivery, a valid signed webhook and the message appearing only in that organisation's portal. Do not test with private real invoices or other recipients.
+5. Only after that round trip passes, set **`VITE_INBOUND_EMAIL_ENABLED=true`** in the production Builds context and rebuild/redeploy. A hostname must be valid and non-placeholder before the address/copy action is shown. This flag is **administrator confirmation, not automatic DNS verification or a backend health check**. Recheck the visible address after deployment; frontend and server domains must match.
 
-   ```text
-   https://YOUR_SITE/.netlify/functions/inbound-email
-   ```
-
-   The `/api/inbound-email` route also maps to the function. Copy this webhook's signing secret into `RESEND_WEBHOOK_SECRET` and redeploy.
-
-5. Send a test from the verified email address of a signed-in organisation member. Confirm that the message appears only in that organisation's inbox. Unknown senders must not gain access to organisation data or trigger disclosure replies.
-6. Forward a harmless sample invoice. This release records the email body and **attachment metadata only**; attachment file bytes are not downloaded into Supabase. Upload the actual invoice separately through the portal if it needs to be retained. Forwarding does not establish a verified expense, an approved budget change or a completed milestone.
+If receiving is not confirmed, keep the flag false. Users see “Email intake is not ready yet” and can upload documents in the portal; existing inbox messages remain reviewable. Receiving failures should be diagnosed without exposing another address or weakening webhook/tenant permissions. This release stores email bodies and **attachment metadata only**; original files still need portal upload. Forwarding does not create a verified expense, approve a budget change or complete a milestone.
 
 Incoming messages are untrusted content. Their text must not override application permissions or AI instructions. Financial records, bank details, private documents and full internal correspondence must not appear in outbound email. Safe summaries can include public grant information and a link to the authenticated portal. Do not enter banking details into this first release.
 
@@ -100,18 +95,22 @@ Weekly and monthly preferences are per organisation. `grant-digest` runs hourly 
 
 Profile preparation runs extract, independent source check and correction as separate authenticated requests. It shows progress and binds the stages to the same source fingerprint. The source controls are disabled while it runs; switching organisation or user stops the pending completion. A failure returns to the source step with pasted text and selected saved documents preserved. Retry restarts all three stages rather than offering a partial result. Only the final corrected profile is presented for review, with explicit approval and acknowledgement of unresolved discrepancies. Changing the sources requires a new preparation; the AI never approves the profile itself.
 
+Discovery separates grounded search from extraction/save; application drafting separates requirement preflight from generation/save. Both are two authenticated, quota-counted requests. The first phase saves no opportunity/application result. Its actor/organisation/originals/state-bound HMAC receipt lasts 15 minutes and uses the existing `AUTH_RATE_LIMIT_SECRET`; no new AI secret is required. The final phase validates that receipt, reloads the current originals and rechecks requirements before writing. A failed search/draft restarts from its first phase, rather than resuming an unverified partial result.
+
+Each model call is bounded to the remaining request budget, with at most 25 seconds inside a 27-second request. This bounds failure handling; it does not prove hosted provider latency. Scheduled digest discovery retains its bounded synchronous pilot/retry behaviour and is not a new background-job system.
+
 PDF and images are supplied to Gemini in their native supported formats. DOCX and XLSX are parsed into text first; layout, images, charts, signatures and other document structure may be lost. Spreadsheet formulas are not recalculated: any displayed formula result comes from the workbook's saved/cached value and needs review. Export to PDF when visual structure or embedded evidence matters. For AI extraction, HTML/XML are read as evidence text rather than executed. Normalisation handles known browser MIME aliases and empty/generic MIME reports for recognised extensions; renaming a file is not a format conversion.
 
 The parser rejects documents over these limits instead of silently truncating their source text:
 
-| Processing boundary | Limit |
-| --- | --- |
-| Upload batch/file | 10 files per batch; 10 MiB per file |
-| AI selection | 8 documents; 15 MiB combined original bytes |
+| Processing boundary      | Limit                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Upload batch/file        | 10 files per batch; 10 MiB per file                                                                                                 |
+| AI selection             | 8 documents; 15 MiB combined original bytes                                                                                         |
 | Extracted/text documents | 200,000 characters per file including extraction notes; 400,000 converted-text characters across the selected documents per request |
-| Office ZIP | 512 entries; 20 MiB expanded total; 8 MiB per expanded entry; entries above 1 MiB also have a 200:1 compression-ratio limit |
-| Office XML | 4,194,304 characters per XML part; maximum depth 128 and 100,000 nodes |
-| Spreadsheet | 20 sheets; 20,000 actual cells; maximum row 5,000 and column 256; 100,000 expanded matrix cells across sheets |
+| Office ZIP               | 512 entries; 20 MiB expanded total; 8 MiB per expanded entry; entries above 1 MiB also have a 200:1 compression-ratio limit         |
+| Office XML               | 4,194,304 characters per XML part; maximum depth 128 and 100,000 nodes                                                              |
+| Spreadsheet              | 20 sheets; 20,000 actual cells; maximum row 5,000 and column 256; 100,000 expanded matrix cells across sheets                       |
 
 Large files may exceed processing limits despite fitting the upload limit. Split them or export the relevant pages/sheets to smaller PDF/text files. Text formats need UTF-8 or BOM-marked UTF-16 encoding. Encrypted/password-protected, macro-enabled and legacy binary Office formats are rejected; save an unprotected, macro-free DOCX/XLSX copy or export the relevant content as PDF. Office extraction leaves the stored original file unchanged. Unavailable formula results and saved spreadsheet errors are marked rather than treated as verified financial values.
 

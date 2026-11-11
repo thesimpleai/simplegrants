@@ -2,6 +2,7 @@ import {
   GoogleGenAI,
   type Part,
   type GenerateContentParameters,
+  ThinkingLevel,
 } from "@google/genai";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -28,6 +29,7 @@ import {
   AIExecutionError,
   waitForAISignal,
   type AIRequestBudget,
+  createAIRequestBudget,
 } from "./ai-runtime";
 import type {
   DocumentRecord,
@@ -61,10 +63,70 @@ export const checksSchema = z
   )
   .max(50);
 
+const nullableProfileSchema = profileSchema.extend({
+  name: z.string().max(300).nullable(),
+  legal_name: z.string().max(300).nullable().optional(),
+  abn: z.string().max(20).nullable().optional(),
+  type: z.string().max(100).nullable().optional(),
+  state: z.string().max(50).nullable().optional(),
+  description: z.string().max(8000).nullable().optional(),
+  focus_areas: z.array(z.string().max(150)).max(20).nullable().optional(),
+  website: z.string().max(1000).nullable().optional(),
+  acnc_registered: z.boolean().nullable().optional(),
+});
+const nullableCheckSchema = checksSchema.element.extend({
+  source: z.string().max(500).nullable().optional(),
+  suggestion: z.string().max(1500).nullable().optional(),
+});
+const evidenceSchema = z
+  .array(
+    z.object({
+      field: z.string().max(120),
+      source: z.string().max(500),
+      quote: z.string().max(2000),
+    }),
+  )
+  .max(50);
+const extractOutputSchema = z.object({
+  profile: nullableProfileSchema,
+  evidence: evidenceSchema.optional(),
+  missing_information: z.array(z.string().max(1000)).max(40).optional(),
+});
+const verifyOutputSchema = z.object({
+  checks: z.array(nullableCheckSchema).max(50),
+  verified_fields: z.array(z.string().max(120)).max(40).optional(),
+});
+const correctOutputSchema = z.object({
+  profile: nullableProfileSchema,
+  checks: z.array(nullableCheckSchema).max(50),
+  evidence: evidenceSchema.optional(),
+});
+function normaliseProfile(value: unknown) {
+  const parsed = nullableProfileSchema.parse(value);
+  return profileSchema.parse({
+    ...Object.fromEntries(
+      Object.entries(parsed).filter(([, item]) => item !== null),
+    ),
+    name: parsed.name ?? "",
+  });
+}
+function normaliseChecks(value: unknown) {
+  return checksSchema.parse(
+    z
+      .array(nullableCheckSchema)
+      .max(50)
+      .parse(value)
+      .map((item) =>
+        Object.fromEntries(
+          Object.entries(item).filter(([, field]) => field !== null),
+        ),
+      ),
+  );
+}
 function client() {
   return new GoogleGenAI({
     apiKey: env("GEMINI_API_KEY"),
-    httpOptions: { timeout: 18000, retryOptions: { attempts: 1 } },
+    httpOptions: { timeout: 25000, retryOptions: { attempts: 1 } },
   });
 }
 async function generateContent(
@@ -74,7 +136,7 @@ async function generateContent(
   budget?.assert();
   const milliseconds = Math.max(
     1,
-    Math.min(18000, budget?.remaining() ?? 18000),
+    Math.min(25000, Math.max(1, (budget?.remaining() ?? 25500) - 500)),
   );
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), milliseconds);
@@ -99,32 +161,59 @@ async function generateContent(
     clearTimeout(timer);
   }
 }
+export interface JSONOutput {
+  schema?: z.ZodType;
+  maxOutputTokens?: number;
+}
+function outputSchema(schema: z.ZodType) {
+  const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(schema, {
+    target: "draft-7",
+  });
+  return jsonSchema;
+}
+function compatibleThinking(model: string) {
+  if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
+    return { thinkingBudget: 0 };
+  if (/^gemini-3(?:\.[0-9]+)?-flash(?:-preview)?$/.test(model))
+    return { thinkingLevel: ThinkingLevel.MINIMAL };
+  return undefined; // In particular, a moving alias must not receive model-specific flags.
+}
 export async function generateJSON(
   prompt: string,
   parts: Part[] = [],
   budget?: AIRequestBudget,
+  output: JSONOutput = {},
 ) {
+  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
   const result = await generateContent(
     {
-      model: process.env.GEMINI_MODEL || "gemini-flash-latest",
+      model,
       contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
       config: {
         systemInstruction: instructions,
         responseMimeType: "application/json",
         temperature: 0.15,
-        maxOutputTokens: 10000,
+        maxOutputTokens: output.maxOutputTokens ?? 4096,
+        ...(output.schema
+          ? { responseJsonSchema: outputSchema(output.schema) }
+          : {}),
+        ...(compatibleThinking(model)
+          ? { thinkingConfig: compatibleThinking(model) }
+          : {}),
       },
     },
     budget,
   );
+  if (result.candidates?.[0]?.finishReason === "MAX_TOKENS")
+    throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT");
   const text = result.text;
-  if (!text) throw new AIExecutionError("response");
+  if (!text) throw new AIExecutionError("response", "EMPTY_TEXT");
   try {
     return stripSensitive(
       JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()),
     ) as Record<string, unknown>;
   } catch {
-    throw new AIExecutionError("response");
+    throw new AIExecutionError("response", "INVALID_JSON");
   }
 }
 export const MAX_AI_EXTRACTED_TEXT_CHARS = 400_000;
@@ -245,9 +334,10 @@ export async function extractProfileStage(
     `Extract an organisation profile ONLY from the supplied evidence. Return {"profile":{"name":"","legal_name":"","abn":"","type":"","state":"","description":"","focus_areas":[],"website":""},"evidence":[{"field":"","source":"","quote":""}],"missing_information":[]}. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
+    { schema: extractOutputSchema, maxOutputTokens: 2048 },
   );
   return {
-    profileDraft: profileSchema.parse(extracted.profile),
+    profileDraft: normaliseProfile(extracted.profile),
     evidence: Array.isArray(extracted.evidence)
       ? extracted.evidence.slice(0, 100)
       : [],
@@ -266,10 +356,11 @@ export async function verifyProfileStage(
     `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
+    { schema: verifyOutputSchema, maxOutputTokens: 2048 },
   );
   return {
     profileDraft: draft,
-    profileChecks: checksSchema.parse(verification.checks ?? []),
+    profileChecks: normaliseChecks(verification.checks ?? []),
     message:
       "Source check completed. The final step corrects the draft for your review.",
   };
@@ -288,9 +379,10 @@ export async function correctProfileStage(
     `Correct the proposed profile using the ORIGINAL sources, not assumptions. Consider every verification finding. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
+    { schema: correctOutputSchema, maxOutputTokens: 3072 },
   );
-  const profile: Profile = profileSchema.parse(corrected.profile);
-  const finalChecks = checksSchema.parse(corrected.checks ?? checks);
+  const profile: Profile = normaliseProfile(corrected.profile);
+  const finalChecks = normaliseChecks(corrected.checks ?? checks);
   if (!profile.name.trim()) {
     profile.name = org.name;
     finalChecks.push({
@@ -368,8 +460,7 @@ function dateOnly(value: string | null | undefined) {
     ? value
     : null;
 }
-export async function discoverOpportunities(
-  db: AppDb,
+export async function searchOpportunitySources(
   org: Organisation,
   budget?: AIRequestBudget,
 ) {
@@ -382,32 +473,73 @@ export async function discoverOpportunities(
         systemInstruction: instructions,
         tools: [{ googleSearch: {} }],
         temperature: 0.1,
-        maxOutputTokens: 8000,
+        maxOutputTokens: 4096,
       },
     },
     budget,
   );
   const chunks =
     result.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-  const sources = chunks.flatMap((chunk) =>
-    chunk.web?.uri && safeHttpsUrl(chunk.web.uri)
-      ? [
-          {
-            title: chunk.web.title || "Grant provider source",
-            uri: chunk.web.uri,
-          },
-        ]
-      : [],
-  );
+  const sources = chunks
+    .flatMap((chunk) =>
+      chunk.web?.uri &&
+      chunk.web.uri.length <= 3000 &&
+      safeHttpsUrl(chunk.web.uri)
+        ? [
+            {
+              title: (chunk.web.title || "Grant provider source").slice(
+                0,
+                1000,
+              ),
+              uri: chunk.web.uri,
+            },
+          ]
+        : [],
+    )
+    .slice(0, 20);
   if (sources.length === 0 || !result.text)
     throw new HttpError(
       422,
       "The search did not return source-backed opportunities. Try again later or add a grant from its official guidelines.",
     );
+  return searchDraftSchema.parse({ summary: result.text, sources });
+}
+export const searchDraftSchema = z
+  .object({
+    summary: z.string().min(1).max(30000),
+    sources: z
+      .array(
+        z
+          .object({
+            title: z.string().max(1000),
+            uri: z
+              .string()
+              .max(3000)
+              .refine((value) => !!safeHttpsUrl(value)),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(20),
+  })
+  .strict();
+export async function extractDiscoveredOpportunities(
+  db: AppDb,
+  org: Organisation,
+  searchDraft: z.infer<typeof searchDraftSchema>,
+  budget?: AIRequestBudget,
+) {
+  const { summary, sources } = searchDraftSchema.parse(searchDraft);
   const extracted = await generateJSON(
-    `Convert the following grounded search result into up to six opportunities. Return {"opportunities":[{"title":"","funder":"","summary":"","source_index":0,"amount_min":null,"amount_max":null,"opens_on":null,"closes_at":null,"location":"","focus_areas":[],"requirements":[]}]}. source_index MUST be the index of the relevant entry in the supplied sources array. Keep unavailable dates/amounts null. Never infer midnight for a date-only deadline; leave closes_at null and explain known date and timezone uncertainty in summary. Exclude closed rounds, generic directories without a specific grant and grants lacking supporting source material. Every summary must state eligibility and dates need confirmation with the provider. Sources: ${JSON.stringify(sources)}\nSEARCH RESULTS (untrusted evidence):\n${result.text}`,
+    `Convert the following grounded search result into up to six opportunities. Return {"opportunities":[{"title":"","funder":"","summary":"","source_index":0,"amount_min":null,"amount_max":null,"opens_on":null,"closes_at":null,"location":"","focus_areas":[],"requirements":[]}]}. source_index MUST be the index of the relevant entry in the supplied sources array. Keep unavailable dates/amounts null. Never infer midnight for a date-only deadline; leave closes_at null and explain known date and timezone uncertainty in summary. Exclude closed rounds, generic directories without a specific grant and grants lacking supporting source material. Every summary must state eligibility and dates need confirmation with the provider. Sources: ${JSON.stringify(sources)}\nSEARCH RESULTS (untrusted evidence):\n${summary}`,
     [],
     budget,
+    {
+      schema: z.object({
+        opportunities: z.array(opportunityDraftSchema).max(6),
+      }),
+      maxOutputTokens: 4096,
+    },
   );
   const rows = z
     .array(opportunityDraftSchema)
@@ -526,6 +658,21 @@ export async function discoverOpportunities(
         : "No current grants could be established from the search. Try adding a grant manually.",
   };
 }
+/** Server-only compatibility path for the scheduled pilot worker; browser calls use authenticated phases. */
+export async function discoverOpportunities(
+  db: AppDb,
+  org: Organisation,
+  budget?: AIRequestBudget,
+) {
+  const bounded = budget ?? createAIRequestBudget();
+  try {
+    const draft = await searchOpportunitySources(org, bounded);
+    return await extractDiscoveredOpportunities(db, org, draft, bounded);
+  } finally {
+    if (!budget) bounded.close();
+  }
+}
+
 export async function importOpportunity(
   db: AppDb,
   org: Organisation,

@@ -3,6 +3,7 @@ import type {
   Opportunity,
   Organisation,
 } from "../../../src/types";
+import { draftEvidenceBlockers } from "../../../src/lib/grant-requirements";
 
 export class HttpError extends Error {
   constructor(
@@ -112,7 +113,14 @@ export function draftBlockers(
     blockers.push(
       "Upload or paste the official program guidelines before drafting.",
     );
+  const sourceBlockers = draftEvidenceBlockers(
+    grant.guidelines_text,
+    documents,
+    now,
+  );
+  blockers.push(...sourceBlockers);
   for (const category of requiredDocumentCategories(grant.requirements)) {
+    if (category === "insurance" && sourceBlockers.length) continue;
     const found = documents.some(
       (d) =>
         (d.category === category ||

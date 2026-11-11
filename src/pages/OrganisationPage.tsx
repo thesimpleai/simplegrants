@@ -31,6 +31,7 @@ import type {
   Organisation,
   Profile,
   ProfileStage,
+  UploadBatchResult,
 } from "../types";
 import {
   DOCUMENT_ACCEPT,
@@ -101,6 +102,9 @@ export default function OrganisationPage() {
   const [busy, setBusy] = useState("");
   const [profileStage, setProfileStage] = useState<ProfileStage | null>(null);
   const [error, setError] = useState("");
+  const [uploadReport, setUploadReport] = useState<UploadBatchResult | null>(
+    null,
+  );
   const [category, setCategory] = useState("registration");
   const [frequency, setFrequency] = useState<Frequency>("weekly");
   const [create, setCreate] = useState(false);
@@ -114,6 +118,7 @@ export default function OrganisationPage() {
     setFrequency(org?.notification_frequency ?? "weekly");
     setWizard(false);
     setError("");
+    setUploadReport(null);
   }, [org?.id]);
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
@@ -166,19 +171,80 @@ export default function OrganisationPage() {
     if (!files.length) return;
     setBusy("upload");
     setError("");
+    setUploadReport(null);
     try {
-      await app.uploadDocuments(files, selectedCategory);
-      app.notify(
-        `${files.length === 1 ? "Document" : "Documents"} added to your organisation.`,
-      );
-    } catch (e) {
-      setError(errorMessage(e));
+      setUploadReport(await app.uploadDocuments(files, selectedCategory));
+    } catch (error) {
+      setError(errorMessage(error));
     } finally {
       setBusy("");
       if (fileInput.current) fileInput.current.value = "";
       if (wizardInput.current) wizardInput.current.value = "";
     }
   }
+  const uploadSummary = uploadReport ? (
+    <section
+      className="notice"
+      role={uploadReport.failed.length ? "alert" : "status"}
+      aria-label="Upload results"
+    >
+      <div>
+        <h3>Upload results</h3>
+        {uploadReport.failed.length > 0 && (
+          <p>
+            {uploadReport.saved.length} document
+            {uploadReport.saved.length === 1 ? " was" : "s were"} saved. Check
+            your library before uploading again.
+          </p>
+        )}
+        <p>
+          <strong>Saved ({uploadReport.saved.length})</strong>
+        </p>
+        {uploadReport.saved.length ? (
+          <ul>
+            {uploadReport.saved.map((name, index) => (
+              <li key={`${name}-${index}`}>{name}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="small muted">No new files saved.</p>
+        )}
+        {uploadReport.failed.length > 0 && (
+          <>
+            <p>
+              <strong>Failed ({uploadReport.failed.length})</strong>
+            </p>
+            <ul>
+              {uploadReport.failed.map((item, index) => (
+                <li key={`${item.name}-${index}`}>
+                  <strong>{item.name}</strong>: {item.reason}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {uploadReport.skipped.length > 0 && (
+          <>
+            <p>
+              <strong>Skipped ({uploadReport.skipped.length})</strong>
+            </p>
+            <ul>
+              {uploadReport.skipped.map((item, index) => (
+                <li key={`${item.name}-${index}`}>
+                  <strong>{item.name}</strong>: {item.reason}
+                </li>
+              ))}
+            </ul>
+            <p className="small muted">
+              Duplicate checks compare file name, size and type. A different
+              version with the same details can be uploaded after you rename it.
+              Renamed copies are not detected.
+            </p>
+          </>
+        )}
+      </div>
+    </section>
+  ) : null;
   async function prepareProfile() {
     if (!history.trim() && selected.length === 0) {
       setError(
@@ -250,7 +316,7 @@ export default function OrganisationPage() {
         name: profile.name.trim(),
         abn: profile.abn || null,
         description: String(profile.description ?? ""),
-        type: String(profile.type ?? org?.type ?? "Not-for-profit"),
+        type: typeof profile.type === "string" ? profile.type.trim() : "",
         state: String(profile.state ?? ""),
         focus_areas: reviewedProfile.focus_areas,
         website: typeof profile.website === "string" ? profile.website : null,
@@ -345,6 +411,7 @@ export default function OrganisationPage() {
           {error}
         </p>
       )}
+      {!wizard && uploadSummary}
       {!org ? (
         <EmptyState
           icon={<Building2 size={38} />}
@@ -469,15 +536,9 @@ export default function OrganisationPage() {
                   details for you.
                 </p>
                 <ol className="simple-steps">
-                  <li>
-                    <span>1</span>Read your source documents
-                  </li>
-                  <li>
-                    <span>2</span>Check facts against the originals
-                  </li>
-                  <li>
-                    <span>3</span>Correct differences for your review
-                  </li>
+                  <li>Read your source documents</li>
+                  <li>Check facts against the originals</li>
+                  <li>Correct differences for your review</li>
                 </ol>
                 <p className="small muted">
                   You always have the final say. Nothing is approved
@@ -676,6 +737,7 @@ export default function OrganisationPage() {
               {error}
             </p>
           )}
+          {uploadSummary}
           {step === "sources" ? (
             <div className="stack">
               <p className="muted">

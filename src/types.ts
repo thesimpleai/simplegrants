@@ -26,6 +26,11 @@ export interface Organisation {
   inbox_alias: string;
   created_at?: string;
 }
+export interface UploadBatchResult {
+  saved: string[];
+  failed: { name: string; reason: string }[];
+  skipped: { name: string; reason: string }[];
+}
 export interface DocumentRecord {
   id: string;
   org_id: string;
@@ -116,7 +121,37 @@ export interface ReviewCheck {
   suggestion?: string;
 }
 export type ProfileStage = "extract" | "verify" | "correct";
+export interface SearchDraft {
+  summary: string;
+  sources: { title: string; uri: string }[];
+}
+export interface DraftRequirement {
+  label: string;
+  source_quote: string;
+  mandatory: boolean;
+  conditional: boolean;
+  condition_applies: boolean | null;
+}
+export interface DraftRequirements {
+  documents: (DraftRequirement & {
+    category:
+      | "financial_statement"
+      | "audit_report"
+      | "insurance"
+      | "registration"
+      | "acnc"
+      | "other";
+  })[];
+  information: (DraftRequirement & {
+    field: "budget" | "summary" | "other";
+    critical: boolean;
+    missing: boolean;
+  })[];
+}
 export interface AIResult {
+  searchDraft?: SearchDraft;
+  draftRequirements?: DraftRequirements;
+  stageIssuedAt?: number;
   profileDraft?: Profile;
   profileChecks?: ReviewCheck[];
   sourceFingerprint?: string;

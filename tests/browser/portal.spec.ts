@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { configureInbox } from "./inbox-fixture";
 test("overview, search, saved grants and source-gated application", async ({
   page,
 }) => {
@@ -119,7 +120,14 @@ test("award becomes a funded project", async ({ page }) => {
 test("email inbox is reviewable and demo AI never pretends to run", async ({
   page,
 }) => {
+  await configureInbox(page, "false");
   await page.goto("/?view=inbox");
+  await expect(
+    page.getByRole("heading", { name: "Email intake is not ready yet." }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy address" })).toHaveCount(
+    0,
+  );
   await page
     .getByRole("button")
     .filter({ hasText: "Photos from our first community lunch" })

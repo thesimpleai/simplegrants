@@ -3,7 +3,10 @@ import { HttpError, json } from "./core";
 
 export type AIFailure = "timeout" | "response";
 export class AIExecutionError extends Error {
-  constructor(public kind: AIFailure) {
+  constructor(
+    public kind: AIFailure,
+    public reason?: "MODEL_OUTPUT_LIMIT" | "EMPTY_TEXT" | "INVALID_JSON",
+  ) {
     super(kind);
   }
 }
@@ -58,6 +61,42 @@ export function createAIRequestBudget(milliseconds = 27000): AIRequestBudget {
   };
 }
 
+function isProviderTimeout(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (
+    ["AbortError", "TimeoutError", "APIConnectionTimeoutError"].includes(
+      String(record.name ?? ""),
+    )
+  )
+    return true;
+  if (
+    [
+      "ETIMEDOUT",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT",
+      "ABORT_ERR",
+    ].includes(String(record.code ?? ""))
+  )
+    return true;
+  // Inspect only for fixed signatures; the message itself is never logged or returned.
+  if (
+    typeof record.message === "string" &&
+    /(?:request|connection|operation|fetch|network|deadline|signal).{0,60}(?:timed out|timeout|aborted|exceeded)|(?:timed out|timeout|aborted).{0,40}(?:request|connection|operation|fetch|network|signal)/i.test(
+      record.message,
+    )
+  )
+    return true;
+  return (
+    depth < 2 && !!record.cause && isProviderTimeout(record.cause, depth + 1)
+  );
+}
 /** Only fixed stages and numeric provider status are recorded, never provider messages or source material. */
 export function aiFailureResponse(
   error: unknown,
@@ -86,10 +125,7 @@ export function aiFailureResponse(
     (error instanceof AIExecutionError && error.kind === "timeout") ||
     providerStatus === 408 ||
     providerStatus === 504 ||
-    (error instanceof Error &&
-      ["AbortError", "TimeoutError", "APIConnectionTimeoutError"].includes(
-        error.name,
-      ));
+    isProviderTimeout(error);
   let code = "SG_AI_UNAVAILABLE",
     status = 503;
   let message =
@@ -127,10 +163,22 @@ export function aiFailureResponse(
       "The AI returned information that could not be checked safely. Please try again.";
   }
   const reference = randomUUID();
+  const failureReason =
+    error instanceof AIExecutionError &&
+    ["MODEL_OUTPUT_LIMIT", "EMPTY_TEXT", "INVALID_JSON"].includes(
+      error.reason || "",
+    )
+      ? error.reason
+      : error instanceof Error && error.name === "ZodError"
+        ? "SCHEMA_MISMATCH"
+        : timeout
+          ? "TIMEOUT"
+          : "OTHER";
   console.error("Simple Grants AI step unavailable", {
     stage,
     code,
     providerStatus: providerStatus ?? "OTHER",
+    failureReason,
     reference,
   });
   return json(

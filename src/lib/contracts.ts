@@ -9,6 +9,7 @@ import type {
   Organisation,
   OrgData,
   ProfileStage,
+  UploadBatchResult,
 } from "../types";
 export interface AppContextValue {
   mode: "demo" | "live";
@@ -28,7 +29,10 @@ export interface AppContextValue {
   signOut: () => Promise<void>;
   createOrg: (name: string, frequency: Frequency) => Promise<void>;
   updateOrg: (patch: Partial<Organisation>) => Promise<void>;
-  uploadDocuments: (files: File[], category: string) => Promise<void>;
+  uploadDocuments: (
+    files: File[],
+    category: string,
+  ) => Promise<UploadBatchResult>;
   removeDocument: (id: string) => Promise<void>;
   openDocument: (id: string) => Promise<void>;
   runAI: (

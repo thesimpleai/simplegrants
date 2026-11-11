@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Bell,
@@ -90,12 +90,15 @@ export default function App() {
     [emailSent, setEmailSent] = useState(false),
     [website, setWebsite] = useState(""),
     [search, setSearch] = useState("");
+  const pickerRef = useRef<HTMLDivElement>(null);
   function navigate(target: string) {
     const parts = target.split("&");
     setPage(parts[0]);
     const params = new URLSearchParams();
     params.set("view", parts[0]);
-    if (app.org) params.set("org", app.org.id);
+    const selectedOrg =
+      new URLSearchParams(window.location.search).get("org") ?? app.org?.id;
+    if (selectedOrg) params.set("org", selectedOrg);
     if (parts[1]) params.set("grant", parts[1].replace("grant=", ""));
     window.history.pushState({}, "", `?${params}`);
     setMobile(false);
@@ -111,6 +114,33 @@ export default function App() {
       setPicker(false);
     }
   }, [app.configured, app.organisationsLoaded, app.connectionError]);
+  useEffect(() => {
+    setSearch("");
+    setPicker(false);
+  }, [app.org?.id]);
+  useEffect(() => {
+    if (!picker) return;
+    const onOutside = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !pickerRef.current?.contains(event.target)
+      )
+        setPicker(false);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setPicker(false);
+      pickerRef.current
+        ?.querySelector<HTMLButtonElement>(".org-switch")
+        ?.focus();
+    };
+    document.addEventListener("pointerdown", onOutside, true);
+    document.addEventListener("keydown", onEscape);
+    return () => {
+      document.removeEventListener("pointerdown", onOutside, true);
+      document.removeEventListener("keydown", onEscape);
+    };
+  }, [picker]);
   async function create() {
     setBusy(true);
     setError("");
@@ -282,7 +312,7 @@ export default function App() {
           simple<span>grant</span>
           <span className="brand-period">.</span>
         </a>
-        <div className="organisation-switcher">
+        <div className="organisation-switcher" ref={pickerRef}>
           <button
             className="org-switch"
             onClick={() => setPicker((p) => !p)}

@@ -21,6 +21,7 @@ import {
   formatDraft,
 } from "../components/ui";
 import type { Application } from "../types";
+import { draftEvidenceBlockers } from "../lib/grant-requirements";
 export default function ApplicationsPage({
   onDiscover,
 }: {
@@ -37,6 +38,8 @@ export default function ApplicationsPage({
     [draft, setDraft] = useState(""),
     [status, setStatus] = useState<Application["status"]>("draft"),
     [reference, setReference] = useState(""),
+    [submittedConfirmed, setSubmittedConfirmed] = useState(false),
+    [referenceUnavailable, setReferenceUnavailable] = useState(false),
     [award, setAward] = useState({
       amount: "",
       startDate: new Date().toISOString().slice(0, 10),
@@ -66,14 +69,60 @@ export default function ApplicationsPage({
     setDraft(formatDraft(a.draft));
     setStatus(a.status);
     setReference(a.grant_reference ?? "");
+    const confirmation = a.project_details.submission_confirmation;
+    setSubmittedConfirmed(
+      Boolean(
+        confirmation &&
+        typeof confirmation === "object" &&
+        "confirmed" in confirmation &&
+        confirmation.confirmed === true,
+      ),
+    );
+    setReferenceUnavailable(
+      Boolean(
+        confirmation &&
+        typeof confirmation === "object" &&
+        "reference_unavailable" in confirmation &&
+        confirmation.reference_unavailable === true,
+      ),
+    );
     setError("");
   }
   async function save() {
     if (!application) return;
+    if (status === "submitted" && !submittedConfirmed)
+      throw new Error(
+        "Confirm that you completed the funder’s submission process before marking this application as submitted.",
+      );
+    if (status === "submitted" && !reference.trim() && !referenceUnavailable)
+      throw new Error(
+        "Add the funder’s submission reference, or confirm that the funder did not provide one.",
+      );
+    const existingConfirmation =
+      application.project_details.submission_confirmation;
     await app.updateApplication(application.id, {
-      project_details: details,
+      project_details: {
+        ...application.project_details,
+        ...details,
+        ...(status === "submitted"
+          ? {
+              submission_confirmation: {
+                confirmed: true,
+                reference_unavailable:
+                  !reference.trim() && referenceUnavailable,
+                confirmed_at:
+                  existingConfirmation &&
+                  typeof existingConfirmation === "object" &&
+                  "confirmed_at" in existingConfirmation &&
+                  typeof existingConfirmation.confirmed_at === "string"
+                    ? existingConfirmation.confirmed_at
+                    : new Date().toISOString(),
+              },
+            }
+          : {}),
+      },
       status,
-      grant_reference: reference || null,
+      grant_reference: reference.trim() || null,
       submitted_at:
         status === "submitted"
           ? (application.submitted_at ?? new Date().toISOString())
@@ -90,6 +139,8 @@ export default function ApplicationsPage({
     setBusy(true);
     setError("");
     try {
+      if (action === "draft" && evidenceBlockers.length)
+        throw new Error(evidenceBlockers.join(" "));
       await save();
       if (action === "draft" && application) {
         const result = await app.runAI({
@@ -134,11 +185,16 @@ export default function ApplicationsPage({
       setBusy(false);
     }
   }
+  const evidenceBlockers = draftEvidenceBlockers(
+    guidelines,
+    app.data.documents,
+  );
   const ready = Boolean(
     app.org?.verification_status === "approved" &&
     guidelines.trim() &&
     details.summary.trim() &&
-    details.application_questions.trim(),
+    details.application_questions.trim() &&
+    evidenceBlockers.length === 0,
   );
   return (
     <>
@@ -319,13 +375,27 @@ export default function ApplicationsPage({
                 be available.
               </Notice>
             )}
+            {evidenceBlockers.length > 0 && (
+              <Notice>
+                <strong>Before drafting, add the required evidence:</strong>
+                <ul>
+                  {evidenceBlockers.map((blocker) => (
+                    <li key={blocker}>{blocker}</li>
+                  ))}
+                </ul>
+                <p>
+                  Upload it to My organisation using the Insurance document
+                  type. Save a current certificate and its expiry date.
+                </p>
+              </Notice>
+            )}
             <button
               className="button primary align-start"
               disabled={busy || !ready}
               onClick={() => perform("draft")}
             >
               {busy ? (
-                <Busy label="Preparing…" />
+                <Busy label="Checking evidence and preparing…" />
               ) : (
                 <>
                   <Sparkles size={17} />
@@ -357,9 +427,11 @@ export default function ApplicationsPage({
                 Application status
                 <select
                   value={status}
-                  onChange={(e) =>
-                    setStatus(e.target.value as Application["status"])
-                  }
+                  onChange={(e) => {
+                    setStatus(e.target.value as Application["status"]);
+                    setSubmittedConfirmed(false);
+                    setReferenceUnavailable(false);
+                  }}
                 >
                   <option value="draft">Being prepared</option>
                   <option value="review">Ready for review</option>
@@ -374,7 +446,10 @@ export default function ApplicationsPage({
                 Funder’s submission reference
                 <input
                   value={reference}
-                  onChange={(e) => setReference(e.target.value)}
+                  onChange={(e) => {
+                    setReference(e.target.value);
+                    if (e.target.value.trim()) setReferenceUnavailable(false);
+                  }}
                   placeholder="Add after submitting"
                 />
               </label>
@@ -458,11 +533,36 @@ export default function ApplicationsPage({
                 </section>
               )}
             {status === "submitted" && (
-              <Notice>
-                Only select Submitted after you have completed the funder’s own
-                submission process. Save its confirmation or receipt in your
-                document vault.
-              </Notice>
+              <div className="stack">
+                <Notice>
+                  You can track an application completed outside Simple Grant.
+                  Only mark it submitted after completing the funder’s own
+                  process. Save the confirmation or receipt in your document
+                  library.
+                </Notice>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={submittedConfirmed}
+                    onChange={(e) => setSubmittedConfirmed(e.target.checked)}
+                    disabled={busy}
+                  />{" "}
+                  I submitted this application to the funder.
+                </label>
+                {!reference.trim() && (
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={referenceUnavailable}
+                      onChange={(e) =>
+                        setReferenceUnavailable(e.target.checked)
+                      }
+                      disabled={busy}
+                    />{" "}
+                    The funder did not provide a submission reference.
+                  </label>
+                )}
+              </div>
             )}
             {opportunity?.source_url && (
               <ExternalLink href={opportunity.source_url}>

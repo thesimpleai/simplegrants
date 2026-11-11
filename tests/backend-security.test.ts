@@ -201,7 +201,11 @@ describe("endpoint security before integration access", () => {
     const response = await ai(
       new Request("https://example.com/api/ai", {
         method: "POST",
-        body: JSON.stringify({ orgId: org.id, action: "discover" }),
+        body: JSON.stringify({
+          orgId: org.id,
+          action: "discover",
+          discoveryStage: "search",
+        }),
       }),
     );
     expect(response.status).toBe(401);

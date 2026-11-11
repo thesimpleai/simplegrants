@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Bookmark,
@@ -25,6 +25,50 @@ import {
   money,
   errorMessage,
 } from "../components/ui";
+function sourceStatus(opportunity: Opportunity): {
+  label: string;
+  tone: string;
+} {
+  if (opportunity.provenance.demo)
+    return { label: "Example opportunity", tone: "cream" };
+  let sourceUrl: string | null = null;
+  try {
+    const url = new URL(opportunity.source_url);
+    if (url.protocol === "https:" && !url.username && !url.password)
+      sourceUrl = url.href;
+  } catch {
+    /* An absent or invalid link is not a found source. */
+  }
+  const citations = opportunity.provenance.sources;
+  const grounded =
+    sourceUrl &&
+    opportunity.provenance.method === "google_search_grounding" &&
+    Array.isArray(citations) &&
+    citations.some((source) => {
+      if (
+        !source ||
+        typeof source !== "object" ||
+        typeof source.uri !== "string"
+      )
+        return false;
+      try {
+        return new URL(source.uri).href === sourceUrl;
+      } catch {
+        return false;
+      }
+    });
+  if (grounded)
+    return { label: "Web source found · check eligibility", tone: "green" };
+  if (sourceUrl)
+    return { label: "Source link added · check details", tone: "cream" };
+  return {
+    label:
+      opportunity.provenance.method === "user_import"
+        ? "Uploaded details · source unverified"
+        : "Source needed · review details",
+    tone: "cream",
+  };
+}
 export default function OpportunitiesPage({
   onApply,
   initialId,
@@ -38,13 +82,59 @@ export default function OpportunitiesPage({
 }) {
   const app = useApp(),
     [filter, setFilter] = useState("all"),
-    [selected, setSelected] = useState(initialId ?? ""),
+    [selected, setSelected] = useState(""),
     [importing, setImporting] = useState(false),
     [text, setText] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [sort, setSort] = useState("recommended");
-  const opportunity = app.data.opportunities.find((o) => o.id === selected);
+  const opportunity = app.data.opportunities.find(
+    (o) => o.id === selected && o.org_id === app.org?.id,
+  );
+  useEffect(() => {
+    const syncSelection = () => {
+      const params = new URLSearchParams(window.location.search);
+      const grantId = params.get("grant");
+      setSelected(
+        params.get("org") === app.org?.id &&
+          app.data.opportunities.some(
+            (item) => item.id === grantId && item.org_id === app.org?.id,
+          )
+          ? grantId!
+          : "",
+      );
+      setError("");
+    };
+    syncSelection();
+    window.addEventListener("popstate", syncSelection);
+    return () => window.removeEventListener("popstate", syncSelection);
+  }, [app.org?.id, app.data.opportunities, initialId]);
+  function selectOpportunity(id: string) {
+    if (
+      !app.org ||
+      !app.data.opportunities.some(
+        (item) => item.id === id && item.org_id === app.org!.id,
+      )
+    )
+      return;
+    const params = new URLSearchParams({
+      view: "opportunities",
+      org: app.org.id,
+      grant: id,
+    });
+    const target = `/?${params.toString()}`;
+    if (`${window.location.pathname}${window.location.search}` !== target)
+      window.history.pushState({}, "", target);
+    setSelected(id);
+    setError("");
+  }
+  function closeOpportunity() {
+    const params = new URLSearchParams({ view: "opportunities" });
+    if (app.org) params.set("org", app.org.id);
+    window.history.replaceState({}, "", `/?${params.toString()}`);
+    setSelected("");
+    setError("");
+  }
   const opportunities = app.data.opportunities
     .filter(
       (o) =>
@@ -150,7 +240,7 @@ export default function OpportunitiesPage({
           </button>
           <button className="button primary" disabled={busy} onClick={discover}>
             {busy ? (
-              <Busy label="Searching…" />
+              <Busy label="Finding and checking sources…" />
             ) : (
               <>
                 <Sparkles size={17} />
@@ -240,10 +330,8 @@ export default function OpportunitiesPage({
                 </span>
               </span>
               <div className="grant-card-meta">
-                <Badge tone={o.provenance.demo ? "cream" : "green"}>
-                  {o.provenance.demo
-                    ? "Example opportunity"
-                    : "Source found · review fit"}
+                <Badge tone={sourceStatus(o).tone}>
+                  {sourceStatus(o).label}
                 </Badge>
                 {o.provenance.date_review_required === true && (
                   <Badge tone="cream">Check application dates</Badge>
@@ -266,8 +354,7 @@ export default function OpportunitiesPage({
             <h2>
               <button
                 onClick={() => {
-                  setSelected(o.id);
-                  setError("");
+                  selectOpportunity(o.id);
                 }}
               >
                 {o.title}
@@ -303,8 +390,7 @@ export default function OpportunitiesPage({
             <button
               className="grant-card-action"
               onClick={() => {
-                setSelected(o.id);
-                setError("");
+                selectOpportunity(o.id);
               }}
             >
               Explore this grant <ArrowRight size={18} />
@@ -342,9 +428,16 @@ export default function OpportunitiesPage({
         guidelines before applying.
       </p>
       {opportunity && (
-        <Modal title={opportunity.title} onClose={() => setSelected("")} wide>
+        <Modal title={opportunity.title} onClose={closeOpportunity} wide>
           <div className="stack">
             <p className="muted">{opportunity.funder}</p>
+            <Badge tone={sourceStatus(opportunity).tone}>
+              {sourceStatus(opportunity).label}
+            </Badge>
+            <p className="muted">
+              A source link does not confirm eligibility. Check the current
+              funder guidelines before applying.
+            </p>
             {Boolean(opportunity.provenance.demo) && (
               <Notice>
                 This is an illustrative opportunity, not a live grant listing.
@@ -442,7 +535,7 @@ export default function OpportunitiesPage({
               />
             </label>
             <Notice>
-              For a PDF, first upload it as Program guidelines in My
+              For a document, first upload it as Grant guidelines in My
               organisation. Your uploaded guidelines will be included in this
               import.
             </Notice>

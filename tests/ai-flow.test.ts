@@ -6,7 +6,10 @@ const mocks = vi.hoisted(() => ({
   documentParts: vi.fn(),
 }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: mocks.createClient }));
-vi.mock("../netlify/functions/lib/gemini", () => ({
+vi.mock("../netlify/functions/lib/gemini", async () => ({
+  ...(await vi.importActual<typeof import("../netlify/functions/lib/gemini")>(
+    "../netlify/functions/lib/gemini",
+  )),
   generateJSON: mocks.generateJSON,
   documentParts: mocks.documentParts,
   discoverOpportunities: vi.fn(),
@@ -79,6 +82,7 @@ function fakeDb() {
               org_id: orgId,
               opportunity_id: grantId,
               status: "draft",
+              updated_at: "2026-11-11T00:00:00.000Z",
               project_details: details,
               ...(typeof update === "object" && update !== null ? update : {}),
             },
@@ -116,6 +120,7 @@ function call(extra: Record<string, unknown> = {}) {
       headers: { Authorization: "Bearer test-jwt" },
       body: JSON.stringify({
         action: "draft",
+        draftStage: "preflight",
         orgId,
         opportunityId: grantId,
         applicationId: appId,
@@ -138,6 +143,10 @@ beforeEach(() => {
   vi.stubEnv("SUPABASE_URL", "https://example.supabase.co");
   vi.stubEnv("SUPABASE_ANON_KEY", "public-test-key");
   vi.stubEnv("GEMINI_API_KEY", "test-model-key");
+  vi.stubEnv(
+    "AUTH_RATE_LIMIT_SECRET",
+    "326cb95c142a5937654e812e4bb13ca49952e7553bbab015dea4b42342e24122",
+  );
   member = { role: "member" };
   guidelines = guidance;
   details = {
@@ -145,7 +154,9 @@ beforeEach(() => {
     application_questions: "Describe the activities and attach a budget.",
     budget_notes: "$5,000 requested for tools and workshops.",
   };
-  documents = [];
+  documents = [
+    { name: "Insurance.pdf", category: "insurance", expires_on: "2099-01-01" },
+  ];
   writes = [];
   project = {
     id: "6a03978d-6266-46b6-b35e-bf8069e50746",
@@ -204,16 +215,15 @@ describe("AI handler authentication and required input flow", () => {
 
 describe("original-guideline evidence preflight", () => {
   it("blocks missing mandatory insurance despite an empty grant-card checklist", async () => {
+    documents = [];
     mocks.generateJSON.mockResolvedValueOnce({
       documents: [requirement()],
       information: [],
     });
     const response = await call();
     expect(response.status).toBe(422);
-    expect(JSON.stringify(await response.json())).toContain(
-      "public liability insurance",
-    );
-    expect(mocks.generateJSON).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(await response.json())).toContain("insurance");
+    expect(mocks.generateJSON).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
   });
   it("asks for a mandatory budget before drafting when project facts lack it", async () => {
@@ -268,7 +278,11 @@ describe("original-guideline evidence preflight", () => {
       ],
       missing_information: [],
     });
-    const response = await call();
+    const first = await call();
+    expect(first.status).toBe(200);
+    const state = await first.json();
+    expect(writes).toHaveLength(0);
+    const response = await call({ ...state, draftStage: "generate" });
     expect(response.status).toBe(200);
     expect(mocks.generateJSON).toHaveBeenCalledTimes(2);
     expect(writes).toHaveLength(1);
@@ -285,10 +299,18 @@ describe("original-guideline evidence preflight", () => {
       information: [],
     });
     mocks.generateJSON.mockResolvedValueOnce({
-      sections: [],
+      sections: [
+        {
+          question: "Describe activities",
+          answer: "Community gardening workshops",
+        },
+      ],
       missing_information: [],
     });
-    expect((await call()).status).toBe(200);
+    const first = await call();
+    expect(first.status).toBe(200);
+    const state = await first.json();
+    expect((await call({ ...state, draftStage: "generate" })).status).toBe(200);
     expect(writes).toHaveLength(1);
   });
 });

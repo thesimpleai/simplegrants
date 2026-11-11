@@ -8,7 +8,9 @@ import {
   stripSensitive,
 } from "./lib/core";
 import {
-  discoverOpportunities,
+  searchOpportunitySources,
+  extractDiscoveredOpportunities,
+  searchDraftSchema,
   documentParts,
   generateJSON,
   importOpportunity,
@@ -19,10 +21,47 @@ import {
   correctProfileStage,
   profileSourceFingerprint,
 } from "./lib/gemini";
-import { applicationPreflight } from "./lib/preflight";
+import {
+  applicationPreflight,
+  preflightSchema,
+  evaluatePreflight,
+} from "./lib/preflight";
+import {
+  aiOriginalFingerprint,
+  issueAIReceipt,
+  verifyAIReceipt,
+} from "./lib/ai-receipt";
 import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
 import type { Profile, DocumentRecord, Opportunity } from "../../src/types";
 
+const draftOutputSchema = z.object({
+  title: z.string().max(500).optional(),
+  sections: z
+    .array(
+      z.object({
+        question: z.string().max(4000),
+        answer: z.string().max(20000),
+        word_limit: z.number().int().nonnegative().nullable().optional(),
+        evidence: z.array(z.string().max(2000)).max(20).optional(),
+        needs_review: z.boolean().optional(),
+      }),
+    )
+    .min(1)
+    .max(30),
+  budget: z
+    .array(
+      z.object({
+        item: z.string().max(500),
+        amount: z.number().nonnegative().nullable(),
+        notes: z.string().max(2000).optional(),
+      }),
+    )
+    .max(60)
+    .optional(),
+  missing_information: z.array(z.string().max(2000)).max(50).optional(),
+  submission_checklist: z.array(z.string().max(2000)).max(50).optional(),
+  human_review_required: z.boolean().optional(),
+});
 const bodySchema = z.object({
   action: z.enum([
     "profile",
@@ -39,6 +78,11 @@ const bodySchema = z.object({
   applicationId: z.uuid().optional(),
   projectId: z.uuid().optional(),
   message: z.string().max(10000).optional(),
+  discoveryStage: z.enum(["search", "extract"]).optional(),
+  draftStage: z.enum(["preflight", "generate"]).optional(),
+  searchDraft: z.unknown().optional(),
+  draftRequirements: z.unknown().optional(),
+  stageIssuedAt: z.number().int().nonnegative().optional(),
   profileStage: z.enum(["extract", "verify", "correct"]).optional(),
   profileDraft: z.unknown().optional(),
   profileChecks: z.unknown().optional(),
@@ -74,11 +118,50 @@ export default async (request: Request) => {
         "Please choose an organisation and provide valid request details.",
       );
     const body = parsed.data;
-    if (body.action !== "profile" && Buffer.byteLength(raw, "utf8") > 160000)
+    if (
+      !["profile", "discover", "draft"].includes(body.action) &&
+      Buffer.byteLength(raw, "utf8") > 160000
+    )
       throw new HttpError(
         413,
         "The pasted content is too long. Upload source files instead.",
       );
+    let searchDraft: z.infer<typeof searchDraftSchema> | undefined;
+    let draftRequirements: z.infer<typeof preflightSchema> | undefined;
+    if (body.action === "discover") {
+      if (!body.discoveryStage)
+        throw new HttpError(
+          422,
+          "Refresh this page and restart grant discovery to use the source-checked search steps.",
+        );
+      if (body.discoveryStage === "extract") {
+        const checked = searchDraftSchema.safeParse(body.searchDraft);
+        if (!checked.success)
+          throw new HttpError(
+            400,
+            "The saved search result could not be checked. Restart grant discovery.",
+          );
+        searchDraft = checked.data;
+      }
+    }
+    if (body.action === "draft") {
+      if (!body.draftStage)
+        throw new HttpError(
+          422,
+          "Refresh this page and restart application preparation to check the current sources first.",
+        );
+      if (body.draftStage === "generate") {
+        const checked = preflightSchema
+          .strict()
+          .safeParse(body.draftRequirements);
+        if (!checked.success)
+          throw new HttpError(
+            400,
+            "The application source check could not be read. Restart application preparation.",
+          );
+        draftRequirements = checked.data;
+      }
+    }
     let profileDraft: Profile | undefined;
     let profileChecks: z.infer<typeof checksSchema> | undefined;
     if (body.action === "profile") {
@@ -112,7 +195,7 @@ export default async (request: Request) => {
       }
     }
     stage = "authentication";
-    const { db } = await budget.read(
+    const { db, user } = await budget.read(
       authenticatedDb(
         request,
         body.orgId,
@@ -139,8 +222,35 @@ export default async (request: Request) => {
     stage = "organisation";
     const org = await budget.read(organisation(db, body.orgId));
     if (body.action === "discover") {
-      stage = "discover";
-      return json(await discoverOpportunities(db, org, budget));
+      stage = `discover_${body.discoveryStage}`;
+      const original = aiOriginalFingerprint({
+        name: org.name,
+        type: org.type,
+        state: org.state,
+        description: org.description,
+        focus_areas: org.focus_areas,
+        abn: org.abn,
+        profile: org.profile,
+      });
+      if (body.discoveryStage === "search") {
+        const searchDraft = await searchOpportunitySources(org, budget);
+        return json({
+          searchDraft,
+          ...issueAIReceipt(user.id, org.id, "discover", original, searchDraft),
+        });
+      }
+      verifyAIReceipt(
+        user.id,
+        org.id,
+        "discover",
+        original,
+        searchDraft,
+        body.sourceFingerprint,
+        body.stageIssuedAt,
+      );
+      return json(
+        await extractDiscoveredOpportunities(db, org, searchDraft!, budget),
+      );
     }
     stage = "documents";
     const { parts, documents, sourceDigests } = await budget.read(
@@ -262,13 +372,90 @@ export default async (request: Request) => {
         !body.text.trim()
       )
         throw new HttpError(422, "Add a project summary before drafting.");
-      const preflight = await applicationPreflight(
+      const original = aiOriginalFingerprint({
+        org: {
+          id: org.id,
+          name: org.name,
+          type: org.type,
+          abn: org.abn,
+          profile: org.profile,
+          verification_status: org.verification_status,
+        },
+        grant: {
+          id: grant.id,
+          title: grant.title,
+          funder: grant.funder,
+          guidelines: grant.guidelines_text,
+        },
+        application: {
+          id: application.id,
+          status: application.status,
+          updated_at: application.updated_at,
+          details: application.project_details,
+        },
+        text: body.text,
+        selectedSources: profileSourceFingerprint(
+          body.text,
+          parts,
+          sourceDigests,
+          org.id,
+        ),
+        documents: [...allDocuments]
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((doc) => ({
+            id: doc.id,
+            name: doc.name,
+            category: doc.category,
+            expires_on: doc.expires_on,
+            size_bytes: doc.size_bytes,
+            storage_path: doc.storage_path,
+            verified: doc.verified,
+          })),
+      });
+      stage = `draft_${body.draftStage}`;
+      if (body.draftStage === "preflight") {
+        const preflight = await applicationPreflight(
+          grant.guidelines_text,
+          stripSensitive(application.project_details),
+          body.text,
+          allDocuments,
+          new Date(),
+          budget,
+        );
+        if (preflight.blockers.length)
+          return json(
+            {
+              error:
+                "Critical information required by the original guidelines is missing.",
+              blockers: preflight.blockers,
+            },
+            422,
+          );
+        return json({
+          draftRequirements: preflight.requirements,
+          ...issueAIReceipt(
+            user.id,
+            org.id,
+            "draft",
+            original,
+            preflight.requirements,
+          ),
+        });
+      }
+      verifyAIReceipt(
+        user.id,
+        org.id,
+        "draft",
+        original,
+        draftRequirements,
+        body.sourceFingerprint,
+        body.stageIssuedAt,
+      );
+      const preflight = evaluatePreflight(
         grant.guidelines_text,
         stripSensitive(application.project_details),
-        body.text,
         allDocuments,
-        new Date(),
-        budget,
+        draftRequirements!,
       );
       if (preflight.blockers.length)
         return json(
@@ -279,43 +466,37 @@ export default async (request: Request) => {
           },
           422,
         );
-      const draft = await generateJSON(
-        `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(stripSensitive(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(stripSensitive(application?.project_details || {}))}\nUser project brief: ${body.text}`,
-        parts,
-        budget,
+      const draft = draftOutputSchema.parse(
+        await generateJSON(
+          `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(stripSensitive(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(stripSensitive(application?.project_details || {}))}\nUser project brief: ${body.text}`,
+          parts,
+          budget,
+          { schema: draftOutputSchema, maxOutputTokens: 6144 },
+        ),
       );
-      if (!Array.isArray(draft.sections))
-        throw new HttpError(
-          502,
-          "The AI did not produce application sections. Please try again.",
-        );
       draft.human_review_required = true;
       budget.assert();
-      const saved = body.applicationId
-        ? checked(
-            await db
-              .from("applications")
-              .update({ draft, status: "draft" })
-              .eq("org_id", org.id)
-              .eq("id", body.applicationId)
-              .select("*")
-              .single(),
-          )
-        : checked(
-            await db
-              .from("applications")
-              .insert({
-                org_id: org.id,
-                opportunity_id: grant.id,
-                title: grant.title,
-                status: "draft",
-                draft,
-                project_details: { brief: body.text },
-                requested_amount: null,
-              })
-              .select("*")
-              .single(),
-          );
+      if (typeof application.updated_at !== "string")
+        throw new HttpError(
+          409,
+          "The application version could not be checked. Refresh this application and restart preparation.",
+        );
+      const saved = checked(
+        await db
+          .from("applications")
+          .update({ draft, status: "draft" })
+          .eq("org_id", org.id)
+          .eq("id", application.id)
+          .eq("updated_at", application.updated_at)
+          .in("status", ["draft", "review"])
+          .select("*")
+          .maybeSingle(),
+      );
+      if (!saved)
+        throw new HttpError(
+          409,
+          "This application changed while AI was preparing the draft. Your saved changes and submission status were preserved. Refresh it before trying again.",
+        );
       return json({
         draft,
         applicationId: saved.id,
