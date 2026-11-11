@@ -12,6 +12,7 @@ import {
   Trash2,
   Upload,
   ArrowUpRight,
+  Download,
   Mail,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
@@ -24,7 +25,25 @@ import {
   Modal,
   Notice,
 } from "../components/ui";
-import type { AIResult, Frequency, Organisation, Profile } from "../types";
+import type {
+  AIResult,
+  Frequency,
+  Organisation,
+  Profile,
+  ProfileStage,
+} from "../types";
+import {
+  DOCUMENT_ACCEPT,
+  SUPPORTED_DOCUMENT_LABEL,
+  MAX_AI_DOCUMENTS,
+  MAX_AI_DOCUMENT_BYTES,
+  resolveDocumentFormat,
+} from "../lib/document-formats";
+const profileProgress: Record<ProfileStage, string> = {
+  extract: "Step 1 of 3: Reading your documents…",
+  verify: "Step 2 of 3: Checking details against the originals…",
+  correct: "Step 3 of 3: Preparing the corrected draft…",
+};
 
 const categories = [
   ["registration", "Registration documents"],
@@ -46,6 +65,13 @@ const states = [
   "WA",
   "Australia-wide",
 ];
+const previewable = (document: { name: string; mime_type: string }) => {
+  const format = resolveDocumentFormat({
+    name: document.name,
+    type: document.mime_type,
+  });
+  return format?.kind === "pdf" || format?.kind === "image";
+};
 const categoryLabel = (value: string) =>
   categories.find(([key]) => key === value)?.[1] ?? value;
 const evidenceText = (value: unknown): string =>
@@ -73,6 +99,7 @@ export default function OrganisationPage() {
   const [checksConfirmed, setChecksConfirmed] = useState(false);
   const [approveConfirmed, setApproveConfirmed] = useState(false);
   const [busy, setBusy] = useState("");
+  const [profileStage, setProfileStage] = useState<ProfileStage | null>(null);
   const [error, setError] = useState("");
   const [category, setCategory] = useState("registration");
   const [frequency, setFrequency] = useState<Frequency>("weekly");
@@ -91,6 +118,11 @@ export default function OrganisationPage() {
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
   );
+  const selectedBytes = publicDocuments
+    .filter((document) => selected.includes(document.id))
+    .reduce((total, document) => total + document.size_bytes, 0);
+  const selectionTooLarge =
+    selected.length > MAX_AI_DOCUMENTS || selectedBytes > MAX_AI_DOCUMENT_BYTES;
   const requiredFacts = [
     org?.name,
     org?.abn,
@@ -108,7 +140,23 @@ export default function OrganisationPage() {
     setHistory("");
     setError("");
     setResult(null);
-    setSelected(publicDocuments.map((document) => document.id));
+    let selectedSize = 0;
+    let selectedCount = 0;
+    setSelected(
+      publicDocuments
+        .filter((document) => {
+          if (
+            selectedCount >= MAX_AI_DOCUMENTS ||
+            selectedSize + document.size_bytes > MAX_AI_DOCUMENT_BYTES
+          )
+            return false;
+          selectedSize += document.size_bytes;
+          selectedCount++;
+          return true;
+        })
+        .map((document) => document.id),
+    );
+    setProfileStage(null);
     setProfile(org?.profile ?? { name: org?.name ?? "" });
     setFocusText((org?.focus_areas ?? []).join(", "));
     setChecksConfirmed(false);
@@ -138,14 +186,24 @@ export default function OrganisationPage() {
       );
       return;
     }
+    if (selectionTooLarge) {
+      setError(
+        "Choose up to 8 documents totalling no more than 15 MB. Your other documents remain in the library.",
+      );
+      return;
+    }
     setBusy("profile");
+    setProfileStage("extract");
     setError("");
     try {
-      const draft = await app.runAI({
-        action: "profile",
-        text: history,
-        documentIds: selected,
-      });
+      const draft = await app.runAI(
+        {
+          action: "profile",
+          text: history,
+          documentIds: selected,
+        },
+        (stage) => setProfileStage(stage),
+      );
       if (!draft.profile)
         throw new Error("A profile draft was not returned. Please try again.");
       setResult(draft);
@@ -158,6 +216,7 @@ export default function OrganisationPage() {
       setError(errorMessage(e));
     } finally {
       setBusy("");
+      setProfileStage(null);
     }
   }
   async function approveProfile() {
@@ -513,7 +572,7 @@ export default function OrganisationPage() {
                 ref={fileInput}
                 hidden
                 type="file"
-                accept=".pdf,.png,.jpg,.jpeg,.txt"
+                accept={DOCUMENT_ACCEPT}
                 multiple
                 onChange={(e) => upload(Array.from(e.target.files ?? []))}
               />
@@ -529,7 +588,7 @@ export default function OrganisationPage() {
               <Upload size={25} />
               <p>Drop documents here, or use the upload button</p>
               <span className="small muted">
-                PDF, JPG, PNG or plain text · up to 10 MB each
+                {SUPPORTED_DOCUMENT_LABEL} · up to 10 MB each
               </span>
             </div>
             {!app.data.documents.length ? (
@@ -561,10 +620,14 @@ export default function OrganisationPage() {
                     </Badge>
                     <button
                       className="icon-button"
-                      aria-label={`Open ${document.name}`}
+                      aria-label={`${previewable(document) ? "Open" : "Download"} ${document.name}`}
                       onClick={() => openDocument(document.id)}
                     >
-                      <ArrowUpRight size={20} />
+                      {previewable(document) ? (
+                        <ArrowUpRight size={20} />
+                      ) : (
+                        <Download size={20} />
+                      )}
                     </button>
                     <button
                       className="icon-button"
@@ -624,6 +687,7 @@ export default function OrganisationPage() {
                 Paste your organisation’s history or information
                 <textarea
                   rows={6}
+                  disabled={!!busy}
                   value={history}
                   onChange={(e) => setHistory(e.target.value)}
                   placeholder="What does your organisation do? Who do you support? You can paste information from your website, annual report or past applications."
@@ -635,6 +699,16 @@ export default function OrganisationPage() {
                   Use registration documents and public background information.
                   Financial statements stay in your document library.
                 </p>
+                <p className="small muted">
+                  Choose up to 8 documents, totalling no more than 15 MB.
+                  Uncheck a document to make room for another.
+                </p>
+                <p className="small">
+                  <strong>
+                    {selected.length} of {publicDocuments.length} selected
+                  </strong>{" "}
+                  · {(selectedBytes / (1024 * 1024)).toFixed(1)} MB of 15 MB
+                </p>
                 {publicDocuments.length ? (
                   <div className="source-document-list">
                     {publicDocuments.map((document) => (
@@ -642,6 +716,13 @@ export default function OrganisationPage() {
                         <input
                           type="checkbox"
                           checked={selected.includes(document.id)}
+                          disabled={
+                            !!busy ||
+                            (!selected.includes(document.id) &&
+                              (selected.length >= MAX_AI_DOCUMENTS ||
+                                selectedBytes + document.size_bytes >
+                                  MAX_AI_DOCUMENT_BYTES))
+                          }
                           onChange={(e) =>
                             setSelected((ids) =>
                               e.target.checked
@@ -665,7 +746,7 @@ export default function OrganisationPage() {
                   hidden
                   type="file"
                   ref={wizardInput}
-                  accept=".pdf,.png,.jpg,.jpeg,.txt"
+                  accept={DOCUMENT_ACCEPT}
                   multiple
                   onChange={(e) =>
                     upload(Array.from(e.target.files ?? []), "registration")
@@ -680,7 +761,8 @@ export default function OrganisationPage() {
                   Add registration documents
                 </button>
                 <p className="small muted">
-                  Select newly uploaded documents above to include them.
+                  Select newly uploaded documents above to include them.{" "}
+                  {SUPPORTED_DOCUMENT_LABEL} · up to 10 MB per file.
                 </p>
               </div>
               <Notice>
@@ -692,6 +774,17 @@ export default function OrganisationPage() {
                 Financial statements and audit reports are kept in your document
                 library and are not selected for this profile step.
               </Notice>
+              {busy === "profile" && profileStage && (
+                <div role="status" aria-live="polite">
+                  <Notice>
+                    <strong>{profileProgress[profileStage]}</strong>
+                    <p className="small">
+                      Keep this page open. Your saved documents will stay in the
+                      library if you need to try again.
+                    </p>
+                  </Notice>
+                </div>
+              )}
               <div className="modal-footer">
                 <button
                   className="button secondary"
@@ -702,11 +795,11 @@ export default function OrganisationPage() {
                 </button>
                 <button
                   className="button primary"
-                  disabled={!!busy}
+                  disabled={!!busy || selectionTooLarge}
                   onClick={prepareProfile}
                 >
                   {busy === "profile" ? (
-                    <Busy label="Reading and checking your sources…" />
+                    <Busy label="Preparing your profile…" />
                   ) : busy === "upload" ? (
                     <Busy label="Uploading…" />
                   ) : (

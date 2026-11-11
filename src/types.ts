@@ -115,7 +115,11 @@ export interface ReviewCheck {
   source?: string;
   suggestion?: string;
 }
+export type ProfileStage = "extract" | "verify" | "correct";
 export interface AIResult {
+  profileDraft?: Profile;
+  profileChecks?: ReviewCheck[];
+  sourceFingerprint?: string;
   profile?: Profile;
   checks?: ReviewCheck[];
   evidence?: unknown[];

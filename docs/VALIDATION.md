@@ -97,6 +97,23 @@ A reported hosted sign-in failure displayed the existing generic unavailable mes
 
 These results validate the diagnostic changes, not a repair to the hosted configuration. Production verification awaits the actual SQL result or a safe deployed error reference; no provider credentials or live email were used.
 
+## Profile preparation and document formats (11 November 2026)
+
+The reported error occurred after **Prepare my profile**, rather than during file upload. Its old text came from a non-JSON failed AI response. The hosted failure was not directly inspected, but the source had a timeout risk: three sequential model calls could take 54 seconds before other work, while the installed Netlify SDK documents a 30-second synchronous default.
+
+Profile extraction, verification and correction now use three separately authenticated requests, each with a 27-second request budget and at most one 18-second model call. Each stage checks quota, reloads selected originals and checks their identity; the fingerprint covers organisation, original text, ordered evidence and downloaded file-byte hashes. Only correction returns an approvable profile. Users see progress and retain their stored documents and inputs after a failure. Each stage counts as one daily AI request.
+
+The shared document policy now supports DOCX/XLSX and additional text formats alongside the existing PDF/images/text. Office originals stay private; bounded text/table extraction is sent to Gemini rather than unsupported Office MIME data. Spreadsheet formulas are not recalculated; missing cached values and saved errors are labelled. Oversized or unsafe documents are rejected without truncation. Non-PDF/image files download as attachments. Migration 006 changes only the dedicated bucket's MIME allowlist.
+
+- `npm test`: **137 of 137 tests passed across twelve files**, including stage contracts, raw-source changes, deadlines, provider-error privacy, Office parsing and upload-format policy.
+- `npm run test:browser`: **43 of 43 workflows passed**, including thirteen profile/document cases plus existing sign-in, portal and connection recovery checks.
+- `npm run build`: TypeScript and the production Vite build passed. `npm run db:check` confirmed that the six-baseline installer matches its sources.
+- `npm run test:db`: **four scenarios passed**, covering fresh six-baseline installs, exact existing policy definitions, prior auth upgrade and standalone 005-to-006 upgrade. Existing records, private access, unrelated metadata and PDF/finance permissions were preserved. The repeat 006 upgrade was a no-op and invalid bucket settings failed safely.
+- All four Functions bundled as CommonJS and loaded on **Node 22.23.4**. Three POST-only endpoints returned 405 for GET; the scheduled digest handler was imported but never invoked. The packaged converter extracted real generated DOCX and XLSX evidence on that runtime.
+- `npm audit --omit=dev`: **zero reported vulnerabilities across 94 production dependencies** at check time. Independent parser, tenant-isolation and privacy review found no remaining concrete blocker.
+
+These are local tests with mocked model/provider calls and disposable PostgreSQL. Migration 006 has been prepared for the existing hosted project but was not applied from this executor. Netlify's deployed revision, real Gemini responses and hosted Office uploads remain unverified; the running task's network policy still blocks those application destinations.
+
 ## Not yet validated
 
 At initial validation there were no configured Supabase, Gemini or Resend projects/keys. The later shared-project preflight does not establish that the current installer or migration 005 upgrade, API exposure, Resend sender verification or application-specific auth configuration has been applied. Hosted authentication/Storage, model availability and real source grounding, actual webhook delivery/DNS, production function timing and scheduled email delivery remain untested. The PostgreSQL test harness has minimal test-only Auth/Storage stubs; it is not a substitute for hosted integration testing.

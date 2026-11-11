@@ -8,6 +8,7 @@ import type {
   Opportunity,
   Organisation,
   OrgData,
+  ProfileStage,
 } from "../types";
 export interface AppContextValue {
   mode: "demo" | "live";
@@ -30,15 +31,18 @@ export interface AppContextValue {
   uploadDocuments: (files: File[], category: string) => Promise<void>;
   removeDocument: (id: string) => Promise<void>;
   openDocument: (id: string) => Promise<void>;
-  runAI: (payload: {
-    action: string;
-    text?: string;
-    documentIds?: string[];
-    opportunityId?: string;
-    applicationId?: string;
-    projectId?: string;
-    message?: string;
-  }) => Promise<AIResult>;
+  runAI: (
+    payload: {
+      action: string;
+      text?: string;
+      documentIds?: string[];
+      opportunityId?: string;
+      applicationId?: string;
+      projectId?: string;
+      message?: string;
+    },
+    onProgress?: (stage: ProfileStage) => void,
+  ) => Promise<AIResult>;
   refresh: () => Promise<void>;
   saveOpportunity: (
     patch: Partial<Opportunity> & { id: string },

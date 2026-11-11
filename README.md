@@ -18,8 +18,8 @@ Without Supabase settings, the portal opens an explicitly labelled fictional dem
 ## Implemented
 
 - Simple Grants-branded Resend email-link sign-in with durable email/IP request limits and app-specific session storage; shared Supabase Auth identities and several organisations under one account.
-- Private, organisation-scoped document storage with database and storage row-level security, isolated in the `simple_grant` schema and `simple-grant-documents` bucket for shared Supabase projects.
-- Organisation onboarding with three Gemini passes: extract, check against originals, correct, then human approval.
+- Private, organisation-scoped document storage with database and storage row-level security, isolated in the `simple_grant` schema and `simple-grant-documents` bucket for shared Supabase projects. PDF/images, DOCX, XLSX and supported text formats can be selected as evidence; Office files are converted to bounded text before AI use.
+- Organisation onboarding with three separate Gemini requests: extract, check against the same original sources, then correct. Progress is shown for each stage; the final profile still requires human approval.
 - Google Search-grounded discovery, user-supplied opportunity imports and saved opportunities. Eligibility remains for review; the application does not invent match scores.
 - Applications gated by approved organisation facts, current guidelines, actual application questions, project information and required evidence. Editable drafts, downloads, status tracking and funder submission references.
 - Award-to-project transition, original proposal, budget, milestones, expenses, evidence links and persisted AI report drafts.
@@ -40,10 +40,10 @@ For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml
 
 For an existing shared Supabase project:
 
-1. For a fresh installation, run **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)** once in its SQL Editor. If migrations 001–004 are already installed, apply **only** [`005_auth_email`](supabase/migrations/202611100005_auth_email.sql).
+1. A fresh installation uses **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)**, containing all six baselines in one transaction. If 001–005 are already installed, apply **only** [`006_document_formats`](supabase/migrations/202611100006_document_formats.sql). If the installation stops at 004, apply 005 then 006, without repeating earlier baselines.
 2. Append `simple_grant` to the existing Data API exposed schemas.
 3. Follow [Authentication](docs/AUTHENTICATION.md) to verify the Resend login sender on `simplegrants.com.au` and configure the four new login environment variables. No additional provider account is needed.
-4. Deploy `main` with migration 005, the four login settings and verified Resend sender configured. Confirm Netlify has deployed that revision, then request a fresh Simple Grants email and test sign-in and private uploads. A source push does not prove live deployment; default preview origins cannot exercise production login.
+4. Deploy `main` with the required upgrades through 006, the four login settings and verified Resend sender configured. Confirm Netlify has deployed that revision, then request a fresh Simple Grants email and test sign-in and private uploads. A source push does not prove live deployment; default preview origins cannot exercise production login.
 
 Keep the shared Auth Site URL, SMTP, templates, signup settings and other redirects unchanged. Simple Grants uses its own `/auth/confirm` page; its email branding and app-local sessions do not create an independent Auth user pool. **Do not run `supabase db push`, reset or migration-history repair against the shared project.** The dedicated schema/bucket preserves unrelated tables and CLI history; earlier public-schema Simple Grant data requires a separate reviewed migration. The server service key remains privileged across the entire project. Someone with project access must apply and test hosted setup; local tests have not verified it.
 

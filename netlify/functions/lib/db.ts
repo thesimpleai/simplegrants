@@ -14,6 +14,7 @@ export async function authenticatedDb(
   request: Request,
   orgId: string,
   write = true,
+  deadlineSignal?: AbortSignal,
 ): Promise<{ db: AppDb; user: User }> {
   const authorization = request.headers.get("authorization");
   if (!authorization?.startsWith("Bearer "))
@@ -24,7 +25,26 @@ export async function authenticatedDb(
   const db = createClient(env("SUPABASE_URL"), key, {
     db: { schema: DB_SCHEMA },
     auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: authorization } },
+    global: {
+      headers: { Authorization: authorization },
+      ...(deadlineSignal
+        ? {
+            fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+              const inputSignal =
+                input instanceof Request ? input.signal : undefined;
+              const signals = [
+                deadlineSignal,
+                init?.signal,
+                inputSignal,
+              ].filter((signal): signal is AbortSignal => !!signal);
+              return globalThis.fetch(input, {
+                ...init,
+                signal: AbortSignal.any(signals),
+              });
+            },
+          }
+        : {}),
+    },
   });
   const {
     data: { user },

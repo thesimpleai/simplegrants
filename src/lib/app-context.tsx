@@ -6,17 +6,28 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { User } from "@supabase/supabase-js";
+import type { Session, User } from "@supabase/supabase-js";
 import type {
   AIResult,
   Application,
   Frequency,
   Organisation,
   OrgData,
+  Profile,
+  ProfileStage,
+  ReviewCheck,
 } from "../types";
 import type { AppContextValue } from "./contracts";
 import { configured, supabase } from "./supabase";
 import { DOCUMENT_BUCKET } from "./constants";
+import {
+  MAX_AI_DOCUMENTS,
+  MAX_AI_DOCUMENT_BYTES,
+  MAX_DOCUMENT_BYTES,
+  MAX_UPLOAD_FILES,
+  resolveDocumentFormat,
+  unsupportedDocumentMessage,
+} from "./document-formats";
 import { signOutFromSimpleGrant } from "./auth-session";
 import { safeAuthReturnPath } from "./auth-links";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
@@ -361,45 +372,90 @@ export function AppProvider({ children }: { children: ReactNode }) {
       throw new Error(
         "File storage is available after connecting Supabase. This demo does not store your documents.",
       );
-    if (files.length > 10)
-      throw new Error("Please upload up to 10 files at a time.");
-    for (const file of files) {
-      if (
-        ![
-          "application/pdf",
-          "image/jpeg",
-          "image/png",
-          "image/webp",
-          "text/plain",
-        ].includes(file.type)
-      )
-        throw new Error("Please use a PDF, JPG, PNG, WebP or TXT file.");
-      if (file.size > 10 * 1024 * 1024)
+    if (!files.length) return;
+    if (files.length > MAX_UPLOAD_FILES)
+      throw new Error(
+        `Please upload up to ${MAX_UPLOAD_FILES} files at a time.`,
+      );
+    // Validate the complete batch before storing any files. Browser MIME values
+    // can be empty, so resolve the recognised extension and MIME together.
+    const prepared = files.map((file) => {
+      const format = resolveDocumentFormat(file);
+      if (!format) throw new Error(unsupportedDocumentMessage(file.name));
+      if (file.size > MAX_DOCUMENT_BYTES)
         throw new Error(
           `${file.name} is too large. Maximum file size is 10 MB.`,
         );
-      const path = `${org.id}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-      const { error } = await supabase.storage
-        .from(DOCUMENT_BUCKET)
-        .upload(path, file, { contentType: file.type });
-      if (error) throw error;
-      const result = await supabase.from("documents").insert({
-        org_id: org.id,
-        name: file.name,
-        category,
-        storage_path: path,
-        mime_type: file.type,
-        size_bytes: file.size,
-        verified: false,
-      });
-      if (result.error) {
-        await supabase.storage.from(DOCUMENT_BUCKET).remove([path]);
-        throw result.error;
+      return { file, format };
+    });
+    const targetOrg = org.id;
+    const targetUser = currentUserId.current;
+    let saved = 0;
+    let uploadError: unknown = null;
+    try {
+      for (const { file, format } of prepared) {
+        if (
+          activeOrg.current !== targetOrg ||
+          currentUserId.current !== targetUser
+        )
+          throw new Error("organisation_changed");
+        const path = `${targetOrg}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+        const { error } = await supabase.storage
+          .from(DOCUMENT_BUCKET)
+          .upload(path, file, { contentType: format.mimeType });
+        if (error) throw error;
+        const result = await supabase.from("documents").insert({
+          org_id: targetOrg,
+          name: file.name,
+          category,
+          storage_path: path,
+          mime_type: format.mimeType,
+          size_bytes: file.size,
+          verified: false,
+        });
+        if (result.error) {
+          await supabase.storage.from(DOCUMENT_BUCKET).remove([path]);
+          throw result.error;
+        }
+        saved++;
+      }
+    } catch (error) {
+      uploadError = error;
+    }
+    // Even a partial batch must become visible so retrying does not duplicate
+    // files that were already saved. refresh keeps its own persistent error.
+    if (
+      saved &&
+      activeOrg.current === targetOrg &&
+      currentUserId.current === targetUser
+    ) {
+      try {
+        await refresh();
+      } catch {
+        /* The workspace connection card provides a separate retry. */
       }
     }
-    await refresh();
+    if (uploadError) {
+      const detail =
+        uploadError && typeof uploadError === "object"
+          ? (uploadError as { message?: unknown })
+          : {};
+      const message = typeof detail.message === "string" ? detail.message : "";
+      const explanation = /organisation_changed/.test(message)
+        ? "Your selected organisation changed. Return to the original organisation to check its files."
+        : /mime|content.?type|unsupported|file type/i.test(message)
+          ? "Your document library needs an update before it can accept this file type. Please contact support."
+          : "We couldn’t finish uploading your documents. Check your connection and try again.";
+      throw new Error(
+        `${saved ? `${saved} document${saved === 1 ? " was" : "s were"} saved. Check your library before uploading again. ` : ""}${explanation}`,
+      );
+    }
+    if (activeOrg.current !== targetOrg || currentUserId.current !== targetUser)
+      throw new Error(
+        "Your selected organisation changed. Your uploaded files remain in the original organisation’s library.",
+      );
     notify(
-      `${files.length} document${files.length === 1 ? "" : "s"} uploaded. Ready for review.`,
+      `${saved} document${saved === 1 ? "" : "s"} uploaded. Ready for review.`,
     );
   }
   async function removeDocument(id: string) {
@@ -433,43 +489,271 @@ export function AppProvider({ children }: { children: ReactNode }) {
       throw new Error(
         "This is an example document. Connect Supabase to upload and view real files.",
       );
+    const format = resolveDocumentFormat({
+      name: doc.name,
+      type: doc.mime_type,
+    });
+    const preview = format?.kind === "pdf" || format?.kind === "image";
     const { data: link, error } = await supabase.storage
       .from(DOCUMENT_BUCKET)
-      .createSignedUrl(doc.storage_path, 60);
+      .createSignedUrl(
+        doc.storage_path,
+        60,
+        preview ? undefined : { download: doc.name },
+      );
     if (error) throw error;
     window.open(link.signedUrl, "_blank", "noopener,noreferrer");
   }
   async function runAI(
     payload: Parameters<AppContextValue["runAI"]>[0],
+    onProgress?: (stage: ProfileStage) => void,
   ): Promise<AIResult> {
     if (!supabase)
       throw new Error(
         "AI is not connected in the demo. Add your Supabase and Gemini settings to use this feature with your own information.",
       );
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (!session) throw new Error("Please sign in again.");
-    const response = await fetch("/api/ai", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ ...payload, orgId }),
+    const targetOrg = orgId;
+    const targetUser = currentUserId.current;
+    const original = Object.freeze({
+      ...payload,
+      text: payload.text ?? "",
+      documentIds: Object.freeze([...(payload.documentIds ?? [])]),
+      orgId: targetOrg,
     });
-    const body = await response.json().catch(() => ({
-      error: "The server could not respond. Please try again.",
-    }));
-    if (!response.ok)
-      throw new Error(
-        [
-          body.error ?? "The AI request failed.",
-          ...(Array.isArray(body.blockers) ? body.blockers : []),
-        ].join(" "),
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    const isProfile = (value: unknown): value is Profile =>
+      isRecord(value) &&
+      typeof value.name === "string" &&
+      ["abn", "type", "state", "description", "website", "legal_name"].every(
+        (key) => value[key] === undefined || typeof value[key] === "string",
+      ) &&
+      (value.acnc_registered === undefined ||
+        typeof value.acnc_registered === "boolean") &&
+      (value.focus_areas === undefined ||
+        (Array.isArray(value.focus_areas) &&
+          value.focus_areas.every((area) => typeof area === "string")));
+    const isChecks = (value: unknown): value is ReviewCheck[] =>
+      Array.isArray(value) &&
+      value.every(
+        (item) =>
+          isRecord(item) &&
+          typeof item.field === "string" &&
+          typeof item.issue === "string" &&
+          (item.source === undefined || typeof item.source === "string") &&
+          (item.suggestion === undefined ||
+            typeof item.suggestion === "string"),
       );
-    await refresh();
-    return body;
+    const savedFiles =
+      original.action === "profile"
+        ? " Your uploaded documents are still saved in your library."
+        : "";
+    function ensureCurrent() {
+      if (
+        !targetOrg ||
+        !targetUser ||
+        activeOrg.current !== targetOrg ||
+        currentUserId.current !== targetUser
+      )
+        throw new Error(
+          "Your selected organisation or sign-in changed. Return to the original organisation and try again. Your saved documents remain in its library.",
+        );
+    }
+    function failure(code = "SG_AI_RESPONSE", reference?: unknown) {
+      const messages: Record<string, string> = {
+        SG_AI_TIMEOUT:
+          "Reading your information took too long. Please try again with fewer documents.",
+        SG_AI_QUOTA:
+          "Your AI assistant has reached a service limit. Please try again later.",
+        SG_AI_SETUP:
+          "Your AI assistant is not fully connected yet. Please contact support.",
+        SG_AI_PROVIDER:
+          "Your AI assistant couldn’t complete the request. Please try again.",
+        SG_AI_UNAVAILABLE:
+          "Your AI assistant is temporarily unavailable. Please try again.",
+        SG_AI_NETWORK:
+          "We couldn’t connect to your AI assistant. Check your connection and try again.",
+        SG_AI_RESPONSE:
+          "We couldn’t read a response from your AI assistant. Please try again.",
+      };
+      const safeCode = Object.hasOwn(messages, code) ? code : "SG_AI_RESPONSE";
+      const safeReference =
+        typeof reference === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          reference,
+        )
+          ? `${reference} (${safeCode})`
+          : safeCode;
+      return new Error(
+        `${messages[safeCode]}${savedFiles} Reference: ${safeReference}.`,
+      );
+    }
+    ensureCurrent();
+    if (original.action === "profile") {
+      if (original.documentIds.length > MAX_AI_DOCUMENTS)
+        throw new Error(
+          `Please choose up to ${MAX_AI_DOCUMENTS} documents for each profile review. Your other documents remain in the library.`,
+        );
+      const total = data.documents
+        .filter((document) => original.documentIds.includes(document.id))
+        .reduce((sum, document) => sum + document.size_bytes, 0);
+      if (total > MAX_AI_DOCUMENT_BYTES)
+        throw new Error(
+          "Please choose documents totalling no more than 15 MB for this profile review. Your other documents remain in the library.",
+        );
+    }
+    let session: Session | null;
+    try {
+      const result = await supabase.auth.getSession();
+      if (result.error) throw result.error;
+      session = result.data.session;
+    } catch {
+      throw new Error(
+        `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
+      );
+    }
+    ensureCurrent();
+    if (!session || session.user.id !== targetUser)
+      throw new Error(
+        `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
+      );
+    async function requestAI(extra: Record<string, unknown> = {}) {
+      ensureCurrent();
+      let response: Response;
+      try {
+        response = await fetch("/api/ai", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session!.access_token}`,
+          },
+          body: JSON.stringify({ ...original, ...extra }),
+          signal: AbortSignal.timeout(45000),
+        });
+      } catch (error) {
+        ensureCurrent();
+        throw failure(
+          error instanceof DOMException &&
+            ["AbortError", "TimeoutError"].includes(error.name)
+            ? "SG_AI_TIMEOUT"
+            : "SG_AI_NETWORK",
+        );
+      }
+      ensureCurrent();
+      if (
+        response.headers
+          .get("content-type")
+          ?.split(";")[0]
+          .trim()
+          .toLowerCase() !== "application/json"
+      )
+        throw failure(
+          [408, 504, 524].includes(response.status)
+            ? "SG_AI_TIMEOUT"
+            : "SG_AI_RESPONSE",
+        );
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw failure();
+      }
+      ensureCurrent();
+      if (!isRecord(body)) throw failure();
+      if (!response.ok || typeof body.error === "string") {
+        if (typeof body.code === "string" && body.code.startsWith("SG_AI_"))
+          throw failure(body.code, body.reference);
+        const safeText = (value: unknown): value is string =>
+          typeof value === "string" &&
+          value.length > 0 &&
+          value.length <= 1500 &&
+          !/[<>\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+        if (safeText(body.error)) {
+          const blockers = Array.isArray(body.blockers)
+            ? body.blockers.filter(safeText).slice(0, 20)
+            : [];
+          const reference =
+            typeof body.reference === "string" &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+              body.reference,
+            )
+              ? `Reference: ${body.reference}.`
+              : "";
+          throw new Error(
+            [body.error, ...blockers, savedFiles.trim(), reference]
+              .filter(Boolean)
+              .join(" "),
+          );
+        }
+        throw failure();
+      }
+      return body;
+    }
+    if (original.action === "profile") {
+      ensureCurrent();
+      onProgress?.("extract");
+      const extracted = await requestAI({ profileStage: "extract" });
+      if (
+        !isProfile(extracted.profileDraft) ||
+        typeof extracted.sourceFingerprint !== "string" ||
+        !/^[0-9a-f]{64}$/i.test(extracted.sourceFingerprint)
+      )
+        throw failure();
+      const sourceFingerprint = extracted.sourceFingerprint;
+      ensureCurrent();
+      onProgress?.("verify");
+      const verified = await requestAI({
+        profileStage: "verify",
+        profileDraft: extracted.profileDraft,
+        sourceFingerprint,
+      });
+      if (
+        !isProfile(verified.profileDraft) ||
+        !isChecks(verified.profileChecks) ||
+        verified.sourceFingerprint !== sourceFingerprint
+      )
+        throw failure();
+      ensureCurrent();
+      onProgress?.("correct");
+      const corrected = await requestAI({
+        profileStage: "correct",
+        profileDraft: verified.profileDraft,
+        profileChecks: verified.profileChecks,
+        sourceFingerprint,
+      });
+      if (
+        !isProfile(corrected.profile) ||
+        !isChecks(corrected.checks) ||
+        corrected.sourceFingerprint !== sourceFingerprint
+      )
+        throw failure();
+      ensureCurrent();
+      return corrected as AIResult;
+    }
+    const result = await requestAI();
+    const valid =
+      original.action === "discover" || original.action === "import-grant"
+        ? Array.isArray(result.opportunities)
+        : original.action === "draft"
+          ? isRecord(result.draft)
+          : original.action === "report"
+            ? isRecord(result.report)
+            : original.action === "ask"
+              ? typeof result.answer === "string"
+              : false;
+    if (!valid) throw failure();
+    ensureCurrent();
+    if (
+      ["discover", "import-grant", "draft", "report"].includes(original.action)
+    ) {
+      try {
+        await refresh();
+      } catch {
+        /* A saved result remains valid; the connection card retries loading separately. */
+      }
+      ensureCurrent();
+    }
+    return result as AIResult;
   }
   async function saveOpportunity(
     patch: Parameters<AppContextValue["saveOpportunity"]>[0],

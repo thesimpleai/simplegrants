@@ -8,6 +8,7 @@ if [ "$#" -eq 0 ]; then
   bash "$0" --adversarial
   bash "$0" --hosted-policies
   bash "$0" --upgrade-auth-email
+  bash "$0" --upgrade-document-formats
   exit
 fi
 case "$1" in
@@ -15,11 +16,11 @@ case "$1" in
     policy_fixture='shared-project-fixture.sql'
     legacy_checks='legacy-behavior.sql'
     ;;
-  --hosted-policies|--upgrade-auth-email)
+  --hosted-policies|--upgrade-auth-email|--upgrade-document-formats)
     policy_fixture='hosted-policy-fixture.sql'
     legacy_checks='hosted-policy-behavior.sql'
     ;;
-  *) echo 'Usage: run-local.sh [--adversarial|--hosted-policies|--upgrade-auth-email]' >&2; exit 2 ;;
+  *) echo 'Usage: run-local.sh [--adversarial|--hosted-policies|--upgrade-auth-email|--upgrade-document-formats]' >&2; exit 2 ;;
 esac
 printf 'Database scenario: %s\n' "$1"
 node "$repo_root/supabase/build-installer.mjs" --check
@@ -72,17 +73,22 @@ $$;
 delete from storage.buckets where id = 'simple-grant-documents';
 select 'PASS: incompatible SG bucket rejected unchanged; entire installer rolled back' as result;
 SQL
-if [ "$1" = '--upgrade-auth-email' ]; then
+if [ "$1" = '--upgrade-auth-email' ] || [ "$1" = '--upgrade-document-formats' ]; then
   # Reproduce an already-installed 001-004 project, then apply ONLY the real005.
-  node --input-type=module - "$repo_root" "$test_dir/baseline.sql" <<'JS'
+  node --input-type=module - "$repo_root" "$test_dir/baseline.sql" "$1" <<'JS'
 import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
-const [root,target] = process.argv.slice(2);
-const files = readdirSync(`${root}/supabase/migrations`).filter((file)=>file.endsWith('.sql') && file < '202611100005_auth_email.sql').sort();
-if (files.length !== 4) throw new Error('Upgrade fixture expects baselines001-004');
+const [root,target,mode] = process.argv.slice(2);
+const boundary=mode==='--upgrade-document-formats'?'202611100006_document_formats.sql':'202611100005_auth_email.sql';
+const expectedCount=mode==='--upgrade-document-formats'?5:4;
+const files = readdirSync(`${root}/supabase/migrations`).filter((file)=>file.endsWith('.sql') && file < boundary).sort();
+if (files.length !== expectedCount) throw new Error('Unexpected upgrade baseline files');
 const parts = files.map((file)=>readFileSync(`${root}/supabase/migrations/${file}`,'utf8').split(/\r?\n/).filter((line)=>!['begin;','commit;'].includes(line.trim().toLowerCase())).join('\n'));
 writeFileSync(target,`begin;\n${parts.join('\n')}\ncommit;\n`);
 JS
   run_sql "$test_dir/baseline.sql"
+  if [ "$1" = '--upgrade-document-formats' ]; then
+    node "$repo_root/supabase/tests/document-formats-upgrade.mjs" "$container_name"
+  else
   docker exec -i "$container_name" psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
 insert into simple_grant.organizations(id,name,notification_frequency,profile)
  values ('80000000-0000-4000-8000-000000000001','Preserved Simple Grant organisation','never','{"upgrade_sentinel":"must remain"}');
@@ -95,6 +101,8 @@ end$$;
 delete from simple_grant.organizations where id='80000000-0000-4000-8000-000000000001';
 select 'PASS: 005-only upgrade preserved existing001-004 SG organisation' as result;
 SQL
+  run_sql "$repo_root/supabase/migrations/202611100006_document_formats.sql"
+  fi
 else
   run_sql "$repo_root/supabase/install-simple-grant.sql"
 fi
@@ -122,3 +130,5 @@ run_sql "$repo_root/supabase/tests/rls.sql"
 
 run_sql "$repo_root/supabase/tests/auth-email.sql"
 node "$repo_root/supabase/tests/auth-email-concurrency.mjs" "$container_name"
+
+run_sql "$repo_root/supabase/tests/document-formats.sql"

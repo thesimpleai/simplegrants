@@ -3,7 +3,6 @@ import { authenticatedDb, checked, organisation } from "./lib/db";
 import {
   draftBlockers,
   env,
-  errorResponse,
   HttpError,
   json,
   stripSensitive,
@@ -13,10 +12,16 @@ import {
   documentParts,
   generateJSON,
   importOpportunity,
-  profilePipeline,
+  profileSchema,
+  checksSchema,
+  extractProfileStage,
+  verifyProfileStage,
+  correctProfileStage,
+  profileSourceFingerprint,
 } from "./lib/gemini";
 import { applicationPreflight } from "./lib/preflight";
-import type { DocumentRecord, Opportunity } from "../../src/types";
+import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
+import type { Profile, DocumentRecord, Opportunity } from "../../src/types";
 
 const bodySchema = z.object({
   action: z.enum([
@@ -34,18 +39,27 @@ const bodySchema = z.object({
   applicationId: z.uuid().optional(),
   projectId: z.uuid().optional(),
   message: z.string().max(10000).optional(),
+  profileStage: z.enum(["extract", "verify", "correct"]).optional(),
+  profileDraft: z.unknown().optional(),
+  profileChecks: z.unknown().optional(),
+  sourceFingerprint: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
 });
 export default async (request: Request) => {
+  const budget = createAIRequestBudget();
+  let stage = "request";
   try {
     if (request.method !== "POST")
       return json({ error: "Use POST for this endpoint." }, 405);
-    if (Number(request.headers.get("content-length") || 0) > 160000)
+    if (Number(request.headers.get("content-length") || 0) > 512 * 1024)
       throw new HttpError(
         413,
         "The pasted content is too long. Upload source files instead.",
       );
-    const raw = await request.text();
-    if (raw.length > 160000)
+    const raw = await budget.read(request.text());
+    if (Buffer.byteLength(raw, "utf8") > 512 * 1024)
       throw new HttpError(413, "The pasted content is too long.");
     let payload: unknown;
     try {
@@ -60,30 +74,77 @@ export default async (request: Request) => {
         "Please choose an organisation and provide valid request details.",
       );
     const body = parsed.data;
-    const { db } = await authenticatedDb(
-      request,
-      body.orgId,
-      body.action !== "ask",
+    if (body.action !== "profile" && Buffer.byteLength(raw, "utf8") > 160000)
+      throw new HttpError(
+        413,
+        "The pasted content is too long. Upload source files instead.",
+      );
+    let profileDraft: Profile | undefined;
+    let profileChecks: z.infer<typeof checksSchema> | undefined;
+    if (body.action === "profile") {
+      if (!body.profileStage)
+        throw new HttpError(
+          422,
+          "Refresh this page and restart Prepare my profile to use the three source-checking steps.",
+        );
+      if (body.profileStage !== "extract") {
+        const draft = profileSchema.strict().safeParse(body.profileDraft);
+        if (!draft.success)
+          throw new HttpError(
+            400,
+            "The profile draft could not be checked. Restart Prepare my profile from your original sources.",
+          );
+        profileDraft = draft.data;
+        if (!body.sourceFingerprint)
+          throw new HttpError(
+            409,
+            "Your source check is missing. Restart Prepare my profile from your original sources.",
+          );
+      }
+      if (body.profileStage === "correct") {
+        const checks = checksSchema.safeParse(body.profileChecks);
+        if (!checks.success)
+          throw new HttpError(
+            400,
+            "The profile checks could not be read. Restart Prepare my profile from your original sources.",
+          );
+        profileChecks = checks.data;
+      }
+    }
+    stage = "authentication";
+    const { db } = await budget.read(
+      authenticatedDb(
+        request,
+        body.orgId,
+        body.action !== "ask",
+        budget.signal,
+      ),
     );
     env("GEMINI_API_KEY");
+    stage = "quota";
+    budget.assert();
     const allowed = checked(
-      await db.rpc("claim_ai_request", {
-        p_org_id: body.orgId,
-        p_action: body.action,
-      }),
+      await budget.read(
+        db.rpc("claim_ai_request", {
+          p_org_id: body.orgId,
+          p_action: body.action,
+        }),
+      ),
     );
     if (!allowed)
       throw new HttpError(
         429,
         "You have reached the daily limit of 60 AI requests. Please try again tomorrow (UTC).",
       );
-    const org = await organisation(db, body.orgId);
-    if (body.action === "discover")
-      return json(await discoverOpportunities(db, org));
-    const { parts, documents } = await documentParts(
-      db,
-      body.orgId,
-      body.documentIds,
+    stage = "organisation";
+    const org = await budget.read(organisation(db, body.orgId));
+    if (body.action === "discover") {
+      stage = "discover";
+      return json(await discoverOpportunities(db, org, budget));
+    }
+    stage = "documents";
+    const { parts, documents, sourceDigests } = await budget.read(
+      documentParts(db, body.orgId, body.documentIds, budget),
     );
     if (body.action === "profile") {
       if (
@@ -100,11 +161,44 @@ export default async (request: Request) => {
           422,
           "For organisation setup, use registration, ACNC and redacted history documents. Keep financial statements and audits in your private document library.",
         );
-      return json(await profilePipeline(org, body.text, parts));
+      budget.assert();
+      const sourceFingerprint = profileSourceFingerprint(
+        body.text,
+        parts,
+        sourceDigests,
+        body.orgId,
+      );
+      if (
+        body.profileStage !== "extract" &&
+        body.sourceFingerprint !== sourceFingerprint
+      )
+        throw new HttpError(
+          409,
+          "Your source documents or pasted information changed. Restart Prepare my profile so all three steps check the same originals.",
+        );
+      stage = `profile_${body.profileStage}`;
+      const result =
+        body.profileStage === "extract"
+          ? await extractProfileStage(org, body.text, parts, budget)
+          : body.profileStage === "verify"
+            ? await verifyProfileStage(body.text, parts, profileDraft!, budget)
+            : await correctProfileStage(
+                org,
+                body.text,
+                parts,
+                profileDraft!,
+                profileChecks!,
+                budget,
+              );
+      budget.assert();
+      return json({ ...result, sourceFingerprint });
     }
-    if (body.action === "import-grant")
-      return json(await importOpportunity(db, org, body.text, parts));
+    if (body.action === "import-grant") {
+      stage = "import_grant";
+      return json(await importOpportunity(db, org, body.text, parts, budget));
+    }
     if (body.action === "draft") {
+      stage = "draft";
       if (!body.opportunityId)
         throw new HttpError(
           422,
@@ -173,6 +267,8 @@ export default async (request: Request) => {
         stripSensitive(application.project_details),
         body.text,
         allDocuments,
+        new Date(),
+        budget,
       );
       if (preflight.blockers.length)
         return json(
@@ -186,6 +282,7 @@ export default async (request: Request) => {
       const draft = await generateJSON(
         `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(stripSensitive(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(stripSensitive(application?.project_details || {}))}\nUser project brief: ${body.text}`,
         parts,
+        budget,
       );
       if (!Array.isArray(draft.sections))
         throw new HttpError(
@@ -193,6 +290,7 @@ export default async (request: Request) => {
           "The AI did not produce application sections. Please try again.",
         );
       draft.human_review_required = true;
+      budget.assert();
       const saved = body.applicationId
         ? checked(
             await db
@@ -226,6 +324,7 @@ export default async (request: Request) => {
       });
     }
     if (body.action === "report") {
+      stage = "report";
       if (!body.projectId)
         throw new HttpError(422, "Choose a funded project first.");
       const { data: project, error } = await db
@@ -260,8 +359,10 @@ export default async (request: Request) => {
       const report = await generateJSON(
         `Prepare a DRAFT grant progress/acquittal report. Never call this audited, verified or ready to submit. Distinguish recorded expenses from verified eligible expenditure. Do not infer outcomes or invent participant counts. Return {"title":"","summary":"","activities":[],"outcomes":[],"financial_summary":"","evidence_gaps":[],"next_steps":[],"human_review_required":true}. Recorded project proposal/budget/milestones (unverified source data; not certified or audited): ${JSON.stringify(stripSensitive(projectEvidence))}\nRecorded expense ledger (unverified): ${JSON.stringify(stripSensitive(expenses))}\nUser context: ${body.text}`,
         parts,
+        budget,
       );
       report.human_review_required = true;
+      budget.assert();
       checked(
         await db
           .from("funded_projects")
@@ -284,9 +385,11 @@ export default async (request: Request) => {
         .eq("org_id", org.id)
         .limit(50),
     );
+    stage = "ask";
     const answer = await generateJSON(
       `Answer this authorised portal user's question based only on the supplied organisation profile, saved grants and any selected documents. If evidence is missing say so and ask a focused question. Do not infer ledger or application details you have not been given. Return {"answer":"plain helpful answer","sources":[]}. Profile: ${JSON.stringify(stripSensitive(org.profile))}\nSaved grants: ${JSON.stringify(grants)}\nQuestion (untrusted user data): ${body.message || body.text}`,
       parts,
+      budget,
     );
     return json({
       answer:
@@ -295,6 +398,8 @@ export default async (request: Request) => {
           : "Please provide a little more detail so I can help.",
     });
   } catch (error) {
-    return errorResponse(error);
+    return aiFailureResponse(error, budget, stage);
+  } finally {
+    budget.close();
   }
 };
