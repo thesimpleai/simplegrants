@@ -697,7 +697,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     function failure(code = "SG_AI_RESPONSE", reference?: unknown) {
       const messages: Record<string, string> = {
         SG_AI_TIMEOUT:
-          "Reading your information took too long. Please try again with fewer documents.",
+          original.action === "discover"
+            ? "The grant search took too long. Try again, or add a grant using its official guidelines."
+            : "This AI step took too long. Your saved information is safe. Please try again.",
         SG_AI_QUOTA:
           "Your AI assistant has reached a service limit. Please try again later.",
         SG_AI_SETUP:

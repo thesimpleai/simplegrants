@@ -386,6 +386,38 @@ describe("separate authenticated profile stages", () => {
 });
 
 describe("bounded AI failures", () => {
+  it.each([
+    {
+      name: "renamed.docx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      content: "This is plain text renamed as an Office document.",
+      status: 415,
+    },
+    {
+      name: "corrupt.docx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      content: "PK\u0003\u0004" + "broken".repeat(12),
+      status: 422,
+    },
+    {
+      name: "oversize.txt",
+      mime: "text/plain",
+      content: "x".repeat(200001),
+      status: 413,
+    },
+  ])(
+    "does not claim AI quota for rejected $name",
+    async ({ name, mime, content, status }) => {
+      documents = [
+        { ...document(), name, mime_type: mime, size_bytes: content.length },
+      ];
+      fileText = content;
+      const response = await call({ profileStage: "extract" });
+      expect(response.status).toBe(status);
+      expect(mocks.rpc).not.toHaveBeenCalled();
+      expect(mocks.generateContent).not.toHaveBeenCalled();
+    },
+  );
   it("returns controlled JSON before the platform deadline for stalled document reads and never continues to the model", async () => {
     vi.useFakeTimers();
     let release: (value: unknown) => void = () => {};

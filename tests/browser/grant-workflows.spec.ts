@@ -190,6 +190,33 @@ test("source badges distinguish uploaded details, added links and grounded citat
   );
 });
 
+test("search timeout offers a relevant retry or guidelines alternative", async ({
+  page,
+}) => {
+  await mockGrantWorkspace(page);
+  await page.route("**/api/ai", (route) =>
+    route.fulfill({
+      status: 504,
+      json: {
+        code: "SG_AI_TIMEOUT",
+        reference: opportunityId,
+        error: "Synthetic timeout",
+      },
+    }),
+  );
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  await page
+    .getByRole("button", { name: "Find grants with AI", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "grant search took too long",
+  );
+  await expect(page.getByRole("alert")).toContainText("official guidelines");
+  await expect(page.getByRole("alert")).not.toContainText("fewer documents");
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+});
+
 test("explicit insurance ineligibility blocks the AI button even with an empty imported requirements list", async ({
   page,
 }) => {
@@ -270,6 +297,11 @@ test("insurance with unknown or expired dates stays blocked until a current expi
       .click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     expect(state.documents[0].expires_on).toBe(expiry);
+    const row = page
+      .locator(".document-row")
+      .filter({ hasText: "Insurance.pdf" });
+    if (expiry.startsWith("2000")) await expect(row).toContainText("Expired");
+    else await expect(row).not.toContainText("Expired");
     await openApplication(page);
     const prepare = page.getByRole("button", {
       name: "Prepare draft with AI",

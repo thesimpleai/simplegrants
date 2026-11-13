@@ -215,7 +215,26 @@ describe("bounded Office and text extraction", () => {
       `<workbook xmlns="${main}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${Array.from({ length: 21 }, (_, index) => `<sheet name="Sheet${index}" sheetId="${index}" r:id="rId${index}"/>`).join("")}</sheets></workbook>`;
     await expect(
       extractDocumentText(zip(repeated), format("file.xlsx")),
-    ).rejects.toMatchObject({ status: 413 });
+    ).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringContaining("20 sheets"),
+    });
+  });
+  it("names the populated-cell limit for a dense 20,002-cell workbook", async () => {
+    const column = (n: number) =>
+      (n > 26 ? String.fromCharCode(64 + Math.floor((n - 1) / 26)) : "") +
+      String.fromCharCode(65 + ((n - 1) % 26));
+    const rows = Array.from(
+      { length: 201 },
+      (_, index) =>
+        `<row r="${index + 1}">${Array.from({ length: index < 200 ? 100 : 2 }, (_, cell) => `<c r="${column(cell + 1)}${index + 1}"><v>1</v></c>`).join("")}</row>`,
+    ).join("");
+    await expect(
+      extractDocumentText(zip(xlsxFiles(rows)), format("large.xlsx")),
+    ).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringContaining("20,000 populated cells"),
+    });
   });
   it("rejects repeated large shared strings before materializing oversized row output", async () => {
     const files: Record<string, string> = xlsxFiles(

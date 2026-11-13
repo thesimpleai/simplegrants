@@ -16,22 +16,27 @@ export function validExpiryDate(value: string): boolean {
     new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
   );
 }
-export function hasCurrentInsurance(
-  documents: EvidenceDocument[],
+export function documentExpiryStatus(
+  value: string | null | undefined,
   now = new Date(),
-): boolean {
+): "unknown" | "expired" | "current" {
+  if (!value || !validExpiryDate(value)) return "unknown";
   const today = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Australia/Melbourne",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(now);
+  return value < today ? "expired" : "current";
+}
+export function hasCurrentInsurance(
+  documents: EvidenceDocument[],
+  now = new Date(),
+): boolean {
   return documents.some(
     (doc) =>
       isInsuranceCategory(doc.category) &&
-      !!doc.expires_on &&
-      validExpiryDate(doc.expires_on) &&
-      doc.expires_on >= today,
+      documentExpiryStatus(doc.expires_on, now) === "current",
   );
 }
 

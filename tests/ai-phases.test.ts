@@ -215,6 +215,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("signed, separate grant discovery phases", () => {
+  it("gives a search-specific timeout message without document advice", async () => {
+    mocks.generateContent.mockRejectedValueOnce(
+      Object.assign(new Error("deadline"), { status: 504 }),
+    );
+    const response = await call({ discoveryStage: "search" });
+    expect(response.status).toBe(504);
+    const body = await response.json();
+    expect(body.error).toContain("grant search took too long");
+    expect(body.error).not.toContain("documents");
+    const request = mocks.generateContent.mock.calls[0][0];
+    expect(request.config.maxOutputTokens).toBe(1536);
+    expect(request.contents).toContain("up to 3");
+  });
   it("uses one call in search without writes, then one extraction call and final scoped insert", async () => {
     search();
     const first = await call({ discoveryStage: "search" });
@@ -248,7 +261,7 @@ describe("signed, separate grant discovery phases", () => {
       ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
     ]);
     expect(
-      mocks.generateContent.mock.calls[1][0].config.responseJsonSchema,
+      mocks.generateContent.mock.calls[1][0].config.responseSchema,
     ).toHaveProperty("properties.opportunities");
   });
   it.each([
@@ -324,10 +337,10 @@ describe("signed, separate application preparation", () => {
     expect(mocks.generateContent).toHaveBeenCalledTimes(2);
     expect(mocks.write).toHaveBeenCalledTimes(1);
     expect(
-      mocks.generateContent.mock.calls[0][0].config.responseJsonSchema,
+      mocks.generateContent.mock.calls[0][0].config.responseSchema,
     ).toHaveProperty("properties.documents");
     expect(
-      mocks.generateContent.mock.calls[1][0].config.responseJsonSchema,
+      mocks.generateContent.mock.calls[1][0].config.responseSchema,
     ).toHaveProperty("properties.sections");
   });
   it.each([
@@ -653,9 +666,7 @@ describe("bounded structured model reliability", () => {
     expect(result.profileDraft.name).toContain("社區中心");
     expect(result.profileDraft).not.toHaveProperty("acnc_registered");
     const configuration = mocks.generateContent.mock.calls[0][0].config;
-    expect(configuration.responseJsonSchema).toHaveProperty(
-      "properties.profile",
-    );
+    expect(configuration.responseSchema).toHaveProperty("properties.profile");
     expect(configuration.maxOutputTokens).toBe(4096);
     expect(configuration).not.toHaveProperty("thinkingConfig");
   });

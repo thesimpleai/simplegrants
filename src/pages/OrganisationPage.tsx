@@ -35,7 +35,10 @@ import type {
   UploadBatchResult,
   DocumentRecord,
 } from "../types";
-import { isInsuranceCategory } from "../lib/grant-requirements";
+import {
+  isInsuranceCategory,
+  documentExpiryStatus,
+} from "../lib/grant-requirements";
 import {
   DOCUMENT_ACCEPT,
   SUPPORTED_DOCUMENT_LABEL,
@@ -707,7 +710,7 @@ export default function OrganisationPage() {
                           ? `${Math.round(document.size_bytes / 1024)} KB`
                           : `${(document.size_bytes / (1024 * 1024)).toFixed(1)} MB`}
                         {document.expires_on &&
-                          ` · Expires ${date(document.expires_on)}`}
+                          ` · ${documentExpiryStatus(document.expires_on) === "expired" ? "Expired" : "Expires"} ${date(document.expires_on)}`}
                         {isInsuranceCategory(document.category) &&
                           !document.expires_on &&
                           " · Expiry not recorded"}

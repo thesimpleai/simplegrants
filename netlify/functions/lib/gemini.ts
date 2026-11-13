@@ -25,6 +25,7 @@ import {
 } from "../../../src/lib/document-formats";
 import { extractDocumentText } from "./document-text";
 import { discoveredRound } from "./opportunity-rounds";
+import { geminiOutputSchema } from "./gemini-schema";
 import {
   AIExecutionError,
   waitForAISignal,
@@ -198,12 +199,6 @@ export interface JSONOutput {
   schema?: z.ZodType;
   maxOutputTokens?: number;
 }
-function outputSchema(schema: z.ZodType) {
-  const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(schema, {
-    target: "draft-7",
-  });
-  return jsonSchema;
-}
 function compatibleThinking(model: string) {
   if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
     return { thinkingBudget: 0 };
@@ -231,7 +226,7 @@ export async function generateJSON(
         temperature: 0.15,
         maxOutputTokens: output.maxOutputTokens ?? 4096,
         ...(output.schema
-          ? { responseJsonSchema: outputSchema(output.schema) }
+          ? { responseSchema: geminiOutputSchema(output.schema) }
           : {}),
         ...(compatibleThinking(model)
           ? { thinkingConfig: compatibleThinking(model) }
@@ -244,13 +239,15 @@ export async function generateJSON(
     throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT");
   const text = result.text;
   if (!text) throw new AIExecutionError("response", "EMPTY_TEXT");
+  let parsed: unknown;
   try {
-    return stripSensitive(
-      JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()),
-    ) as Record<string, unknown>;
+    parsed = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim());
   } catch {
     throw new AIExecutionError("response", "INVALID_JSON");
   }
+  return stripSensitive(
+    output.schema ? output.schema.parse(parsed) : parsed,
+  ) as Record<string, unknown>;
 }
 export const MAX_AI_EXTRACTED_TEXT_CHARS = 400_000;
 export type DocumentSourceDigest = { documentId: string; sha256: string };
@@ -505,12 +502,12 @@ export async function searchOpportunitySources(
   const result = await generateContent(
     {
       model,
-      contents: `Find up to 6 current Australian grant opportunities suitable for this organisation, as of ${new Date().toISOString().slice(0, 10)}. Use web search, primary grant providers, real currently-open or forthcoming rounds. Cite sources for each. State amounts, open and closing dates including timezone ONLY when explicitly available. Do not invent deadlines or suggest expired rounds. Explain uncertainty and mandatory requirements. Public organisation profile: ${JSON.stringify(stripSensitive({ name: org.name, type: org.type, state: org.state, description: org.description, focus_areas: org.focus_areas }))}`,
+      contents: `Use one focused web search to find up to 3 current Australian grant opportunities suitable for this organisation, as of ${new Date().toISOString().slice(0, 10)}. Use web search, primary grant providers, real currently-open or forthcoming rounds. Keep the answer brief: for each grant return its title, funder, one sentence about fit, and a citation. State amounts and deadlines ONLY when explicitly shown in the source. Do not expand into a research report. Do not invent deadlines or suggest expired rounds. Explain uncertainty and mandatory requirements. Public organisation profile: ${JSON.stringify(stripSensitive({ name: org.name, type: org.type, state: org.state, description: org.description, focus_areas: org.focus_areas }))}`,
       config: {
         systemInstruction: instructions,
         tools: [{ googleSearch: {} }],
         temperature: 0.1,
-        maxOutputTokens: 4096,
+        maxOutputTokens: 1536,
         ...(compatibleThinking(model)
           ? { thinkingConfig: compatibleThinking(model) }
           : {}),

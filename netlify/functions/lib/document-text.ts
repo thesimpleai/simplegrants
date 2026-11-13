@@ -21,6 +21,13 @@ const tooLarge = () =>
     413,
     "This document is too large or complex for AI reading. Split it into smaller files or export the relevant pages as PDF.",
   );
+const spreadsheetLimit = (limit: "sheets" | "cells") =>
+  new HttpError(
+    413,
+    limit === "sheets"
+      ? "This workbook exceeds the limit of 20 sheets for AI reading. Choose fewer sheets or export the relevant sheets as PDF."
+      : "This workbook exceeds the limit of 20,000 populated cells for AI reading. Split it into smaller workbooks or export the relevant sheets as PDF.",
+  );
 const unreadable = () =>
   new HttpError(
     422,
@@ -293,7 +300,8 @@ function inspectSheet(xml: string): {
         maxRow = Math.max(maxRow, row);
       }
       if (local === "c") {
-        if (cell || ++cells > MAX_SPREADSHEET_CELLS) throw tooLarge();
+        if (cell) throw unreadable();
+        if (++cells > MAX_SPREADSHEET_CELLS) throw spreadsheetLimit("cells");
         const address = /^([A-Z]{1,3})([1-9][0-9]*)$/.exec(attributes.r ?? "");
         if (!address) throw unreadable();
         const column = columnNumber(address[1]),
@@ -372,7 +380,7 @@ function spreadsheetTargets(files: Record<string, Uint8Array>): string[] {
         throw unreadable();
       ids.push(id);
       names.add(attributes.name.toLowerCase());
-      if (ids.length > MAX_SPREADSHEET_SHEETS) throw tooLarge();
+      if (ids.length > MAX_SPREADSHEET_SHEETS) throw spreadsheetLimit("sheets");
     },
   });
   if (!ids.length || !files["xl/_rels/workbook.xml.rels"]) throw unreadable();
@@ -478,8 +486,8 @@ export async function extractDocumentText(
       const inspected = inspectSheet(decodeText(Buffer.from(files[name])));
       cells += inspected.cells;
       matrix += inspected.matrix;
-      if (cells > MAX_SPREADSHEET_CELLS || matrix > MAX_EXPANDED_MATRIX_CELLS)
-        throw tooLarge();
+      if (cells > MAX_SPREADSHEET_CELLS) throw spreadsheetLimit("cells");
+      if (matrix > MAX_EXPANDED_MATRIX_CELLS) throw tooLarge();
       if (inspected.changed) {
         files[name] = Buffer.from(inspected.xml);
         changed = true;
@@ -492,7 +500,8 @@ export async function extractDocumentText(
       trim: false,
       parseNumber: (number) => number,
     });
-    if (workbook.length > MAX_SPREADSHEET_SHEETS) throw tooLarge();
+    if (workbook.length > MAX_SPREADSHEET_SHEETS)
+      throw spreadsheetLimit("sheets");
     const output = [
       "EXCEL TEXT EXTRACT (unverified). Sheet names and cell addresses identify saved values. Formula results are cached values from the last save, are not recalculated or verified, and may be stale. Unavailable formula results are labelled. Formatting, charts, images and embedded objects are not included.",
     ];
