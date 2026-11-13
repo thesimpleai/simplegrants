@@ -105,7 +105,7 @@ export function providerFailure(
   status?: number;
   reason: "TIMEOUT" | "NETWORK" | "PROVIDER" | "OTHER";
 } {
-  if (isProviderTimeout(error)) return { reason: "TIMEOUT" };
+  const timedOut = isProviderTimeout(error);
   if (!error || typeof error !== "object" || error instanceof HttpError)
     return { reason: "OTHER" };
   const record = error as {
@@ -116,11 +116,15 @@ export function providerFailure(
   };
   if (
     typeof record.status === "number" &&
-    [400, 401, 403, 404, 408, 413, 415, 429, 500, 502, 503, 504].includes(
-      record.status,
-    )
+    Number.isInteger(record.status) &&
+    record.status >= 400 &&
+    record.status <= 599
   )
-    return { status: record.status, reason: "PROVIDER" };
+    return {
+      status: record.status,
+      reason: [408, 504].includes(record.status) ? "TIMEOUT" : "PROVIDER",
+    };
+  if (timedOut) return { reason: "TIMEOUT" };
   if (
     [
       "ECONNRESET",
@@ -136,6 +140,56 @@ export function providerFailure(
   return depth < 2 && record.cause
     ? providerFailure(record.cause, depth + 1)
     : { reason: "OTHER" };
+}
+const providerCodes = new Set([
+  "RESOURCE_EXHAUSTED",
+  "INVALID_ARGUMENT",
+  "PERMISSION_DENIED",
+  "UNAUTHENTICATED",
+  "NOT_FOUND",
+  "UNAVAILABLE",
+  "INTERNAL",
+  "DEADLINE_EXCEEDED",
+  "FAILED_PRECONDITION",
+  "UNKNOWN",
+]);
+function providerDiagnostics(error: unknown) {
+  const knownTypes = new Set([
+    "ApiError",
+    "TypeError",
+    "SyntaxError",
+    "Error",
+    "AbortError",
+    "TimeoutError",
+    "ZodError",
+    "AIExecutionError",
+    "HttpError",
+  ]);
+  const record =
+    error && typeof error === "object"
+      ? (error as { name?: unknown; message?: unknown })
+      : {};
+  const errorType =
+    typeof record.name === "string" && knownTypes.has(record.name)
+      ? record.name
+      : "OTHER";
+  let providerCode = "OTHER";
+  // ApiError.message is JSON returned by Google. Extract ONLY the canonical
+  // enum, never its free-form message/details (which may echo private inputs).
+  if (
+    record.name === "ApiError" &&
+    typeof record.message === "string" &&
+    record.message.length < 100_000
+  ) {
+    try {
+      const code: unknown = JSON.parse(record.message)?.error?.status;
+      if (typeof code === "string" && providerCodes.has(code))
+        providerCode = code;
+    } catch {
+      /* Non-JSON provider bodies remain private. */
+    }
+  }
+  return { errorType, providerCode };
 }
 /** Only fixed stages and numeric provider status are recorded, never provider messages or source material. */
 export function aiFailureResponse(
@@ -153,7 +207,7 @@ export function aiFailureResponse(
     (error instanceof AIExecutionError && error.kind === "timeout") ||
     providerStatus === 408 ||
     providerStatus === 504 ||
-    isProviderTimeout(error);
+    (!providerStatus && isProviderTimeout(error));
   let code = "SG_AI_UNAVAILABLE",
     status = 503;
   let message =
@@ -173,7 +227,7 @@ export function aiFailureResponse(
       error instanceof HttpError
         ? error.message
         : "The AI service has reached its usage limit. Please try again later.";
-  } else if ([401, 403, 404].includes(providerStatus || 0)) {
+  } else if ([400, 401, 402, 403, 404, 415].includes(providerStatus || 0)) {
     code = "SG_AI_PROVIDER";
     message =
       "The AI provider or selected model is unavailable. Ask an administrator to check the Gemini key and model settings.";
@@ -207,6 +261,7 @@ export function aiFailureResponse(
     code,
     providerStatus: providerStatus ?? "OTHER",
     failureReason,
+    ...providerDiagnostics(error),
     reference,
   });
   return json(

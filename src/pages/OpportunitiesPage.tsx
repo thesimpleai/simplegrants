@@ -12,6 +12,7 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import { opportunityIdFromParams } from "../lib/auth-links";
 import type { Opportunity } from "../types";
 import {
   Badge,
@@ -94,7 +95,7 @@ export default function OpportunitiesPage({
   useEffect(() => {
     const syncSelection = () => {
       const params = new URLSearchParams(window.location.search);
-      const grantId = params.get("grant");
+      const grantId = opportunityIdFromParams(params);
       setSelected(
         params.get("org") === app.org?.id &&
           app.data.opportunities.some(

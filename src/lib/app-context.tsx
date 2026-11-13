@@ -31,6 +31,7 @@ import {
 } from "./document-formats";
 import { signOutFromSimpleGrant } from "./auth-session";
 import { safeAuthReturnPath } from "./auth-links";
+import { validExpiryDate } from "./grant-requirements";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
 function organisationPreferenceKey(userId: string) {
   let project = configured ? "connected-project" : "demo";
@@ -362,6 +363,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const params = new URLSearchParams(window.location.search);
     params.set("org", id);
     params.delete("grant");
+    params.delete("opportunity");
     window.history.replaceState(
       {},
       "",
@@ -426,12 +428,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   async function uploadDocuments(
     files: File[],
     category: string,
+    expiresOn: string | null = null,
   ): Promise<UploadBatchResult> {
     if (!org) throw new Error("Choose an organisation first.");
     if (!supabase)
       throw new Error(
         "File storage is available after connecting Supabase. This demo does not store your documents.",
       );
+    if (expiresOn !== null && !validExpiryDate(expiresOn))
+      throw new Error("Enter a valid document expiry date.");
     const result: UploadBatchResult = { saved: [], failed: [], skipped: [] };
     if (!files.length) return result;
     if (files.length > MAX_UPLOAD_FILES)
@@ -491,13 +496,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const { file, format } = queue[index];
       if (!isCurrent()) {
         result.skipped.push(
-          ...queue
-            .slice(index)
-            .map((item) => ({
-              name: item.file.name,
-              reason:
-                "Organisation or sign-in changed before this file was uploaded.",
-            })),
+          ...queue.slice(index).map((item) => ({
+            name: item.file.name,
+            reason:
+              "Organisation or sign-in changed before this file was uploaded.",
+          })),
         );
         break;
       }
@@ -510,17 +513,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (uploaded.error) throw uploaded.error;
         stored = true;
         if (!isCurrent()) throw new Error("organisation_changed");
-        const saved = await supabase
-          .from("documents")
-          .insert({
-            org_id: targetOrg,
-            name: file.name,
-            category,
-            storage_path: path,
-            mime_type: format.mimeType,
-            size_bytes: file.size,
-            verified: false,
-          });
+        const saved = await supabase.from("documents").insert({
+          org_id: targetOrg,
+          name: file.name,
+          category,
+          expires_on: expiresOn,
+          storage_path: path,
+          mime_type: format.mimeType,
+          size_bytes: file.size,
+          verified: false,
+        });
         if (saved.error) throw saved.error;
         result.saved.push(file.name);
       } catch (error) {
@@ -558,6 +560,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
         `${result.saved.length} saved · ${result.failed.length} failed · ${result.skipped.length} skipped. Review the upload results.`,
       );
     return result;
+  }
+  async function updateDocumentExpiry(id: string, expiresOn: string | null) {
+    const targetOrg = orgId;
+    const targetUser = currentUserId.current;
+    if (
+      !data.documents.some((doc) => doc.id === id && doc.org_id === targetOrg)
+    )
+      throw new Error("Choose a document in this organisation.");
+    if (expiresOn !== null && !validExpiryDate(expiresOn))
+      throw new Error("Enter a valid document expiry date.");
+    if (supabase) {
+      const { data: saved, error } = await supabase
+        .from("documents")
+        .update({ expires_on: expiresOn })
+        .eq("id", id)
+        .eq("org_id", targetOrg)
+        .select("id, expires_on")
+        .maybeSingle();
+      if (error || !saved || saved.id !== id || saved.expires_on !== expiresOn)
+        throw new Error(
+          "The document expiry could not be saved. Check your access and try again.",
+        );
+    }
+    if (activeOrg.current !== targetOrg || currentUserId.current !== targetUser)
+      return;
+    setData((current) => ({
+      ...current,
+      documents: current.documents.map((doc) =>
+        doc.id === id ? { ...doc, expires_on: expiresOn } : doc,
+      ),
+    }));
+    notify("Document expiry saved.");
   }
   async function removeDocument(id: string) {
     const doc = data.documents.find((d) => d.id === id);
@@ -669,7 +703,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         SG_AI_SETUP:
           "Your AI assistant is not fully connected yet. Please contact support.",
         SG_AI_PROVIDER:
-          "Your AI assistant couldn’t complete the request. Please try again.",
+          "Your AI assistant needs a configuration check. Please contact support.",
         SG_AI_UNAVAILABLE:
           "Your AI assistant is temporarily unavailable. Please try again.",
         SG_AI_NETWORK:
@@ -1249,6 +1283,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         createOrg,
         updateOrg,
         uploadDocuments,
+        updateDocumentExpiry,
         removeDocument,
         openDocument,
         runAI,

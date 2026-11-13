@@ -2,6 +2,10 @@ import { z } from "zod";
 import type { DocumentRecord } from "../../../src/types";
 import { generateJSON } from "./gemini";
 import type { AIRequestBudget } from "./ai-runtime";
+import {
+  hasCurrentInsurance,
+  validExpiryDate,
+} from "../../../src/lib/grant-requirements";
 
 const requirementBase = {
   label: z.string().min(1).max(300),
@@ -116,14 +120,18 @@ export function evaluatePreflight(
       );
       continue;
     }
-    const present = documents.some(
-      (doc) =>
-        aliases[requirement.category].includes(doc.category) &&
-        (!doc.expires_on || doc.expires_on >= today) &&
-        (requirement.category !== "other" ||
-          normalise(doc.name).includes(normalise(requirement.label)) ||
-          normalise(requirement.label).includes(normalise(doc.name))),
-    );
+    const present =
+      requirement.category === "insurance"
+        ? hasCurrentInsurance(documents, now)
+        : documents.some(
+            (doc) =>
+              aliases[requirement.category].includes(doc.category) &&
+              (!doc.expires_on ||
+                (validExpiryDate(doc.expires_on) && doc.expires_on >= today)) &&
+              (requirement.category !== "other" ||
+                normalise(doc.name).includes(normalise(requirement.label)) ||
+                normalise(requirement.label).includes(normalise(doc.name))),
+          );
     if (!present)
       blockers.push(
         `Upload a current ${requirement.label} before drafting. Guideline: “${requirement.source_quote}”`,

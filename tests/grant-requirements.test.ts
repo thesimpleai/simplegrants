@@ -74,7 +74,7 @@ describe("explicit insurance requirements from original guidelines", () => {
         [{ category: "insurance", expires_on: null }],
         now,
       ),
-    ).toEqual([]);
+    ).toHaveLength(1);
   });
 
   it("server draft readiness uses the original source even when the imported requirements list is empty", () => {

@@ -80,9 +80,14 @@ async function mockGrantWorkspace(
     documents: structuredClone(changes.documents ?? []),
     application: structuredClone(changes.application ?? application),
     ai: [] as Record<string, unknown>[],
-    updates: [] as { table: string; patch: Record<string, unknown> }[],
+    updates: [] as {
+      table: string;
+      patch: Record<string, unknown>;
+      orgId: string;
+    }[],
     reads: 0,
     signOuts: [] as unknown[],
+    rejectDocumentExpiry: false,
   };
   await page.route("**/src/lib/supabase.ts*", (route) =>
     route.fulfill({
@@ -90,7 +95,7 @@ async function mockGrantWorkspace(
       body: `export const configured=true;
 const user=${JSON.stringify(user)};let callback;let signedIn=${changes.signedIn ?? true} || sessionStorage.getItem('test-grant-signed-in')==='true';
 window.__changeGrantUser=next=>{signedIn=!!next;callback?.(next?'SIGNED_IN':'SIGNED_OUT',next?{user:next,access_token:'synthetic-access'}:null)};
-export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,access_token:'synthetic-access'}:null},error:null}),verifyOtp:async input=>{const result=await(await fetch('/test-grant-verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)})).json();if(result.data.session)sessionStorage.setItem('test-grant-signed-in','true');return result;},onAuthStateChange:cb=>{callback=cb;return {data:{subscription:{unsubscribe(){if(callback===cb)callback=null}}}}},signOut:async options=>{await fetch('/test-grant-signout',{method:'POST',body:JSON.stringify(options)});window.__changeGrantUser(null);return {error:null}}},from:table=>({select:()=>({order:async()=>(await fetch('/test-grant-organizations')).json(),eq:async(field,id)=>(await fetch('/test-grant-records?table='+table+'&org='+id)).json()}),update:patch=>({eq:(field,id)=>({eq:async()=>(await fetch('/test-grant-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,id,patch})})).json()})})})};`,
+export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,access_token:'synthetic-access'}:null},error:null}),verifyOtp:async input=>{const result=await(await fetch('/test-grant-verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)})).json();if(result.data.session)sessionStorage.setItem('test-grant-signed-in','true');return result;},onAuthStateChange:cb=>{callback=cb;return {data:{subscription:{unsubscribe(){if(callback===cb)callback=null}}}}},signOut:async options=>{await fetch('/test-grant-signout',{method:'POST',body:JSON.stringify(options)});window.__changeGrantUser(null);return {error:null}}},from:table=>({select:()=>({order:async()=>(await fetch('/test-grant-organizations')).json(),eq:async(field,id)=>(await fetch('/test-grant-records?table='+table+'&org='+id)).json()}),update:patch=>({eq:(field,id)=>({eq:(scope,orgId)=>{const send=async()=>(await fetch('/test-grant-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,id,orgId,patch})})).json();return {then:(resolve,reject)=>send().then(resolve,reject),select:()=>({maybeSingle:send})};}})})})};`,
     }),
   );
   await page.route("**/test-grant-organizations", (route) =>
@@ -115,14 +120,26 @@ export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,
   });
   await page.route("**/test-grant-update", (route) => {
     const body = route.request().postDataJSON();
-    state.updates.push({ table: body.table, patch: body.patch });
+    if (body.table === "documents" && state.rejectDocumentExpiry)
+      return route.fulfill({ json: { data: null, error: null } });
+    state.updates.push({
+      table: body.table,
+      patch: body.patch,
+      orgId: body.orgId,
+    });
     if (body.table === "applications")
       state.application = { ...state.application, ...body.patch };
     if (body.table === "opportunities")
       state.grants = state.grants.map((grant) =>
         grant.id === body.id ? { ...grant, ...body.patch } : grant,
       );
-    return route.fulfill({ json: { error: null } });
+    if (body.table === "documents")
+      state.documents = state.documents.map((doc) =>
+        doc.id === body.id ? { ...doc, ...body.patch } : doc,
+      );
+    return route.fulfill({
+      json: { data: { id: body.id, ...body.patch }, error: null },
+    });
   });
   await page.route("**/test-grant-signout", (route) => {
     state.signOuts.push(route.request().postDataJSON());
@@ -204,6 +221,112 @@ test("explicit insurance ineligibility blocks the AI button even with an empty i
     page.getByRole("button", { name: "Prepare draft with AI", exact: true }),
   ).toBeEnabled();
   expect(state.ai).toEqual([]);
+});
+
+test("insurance with unknown or expired dates stays blocked until a current expiry is saved", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page, {
+    grants: [
+      {
+        ...opportunity,
+        guidelines_text:
+          "Applicants must hold current public liability insurance.",
+      },
+    ],
+    documents: [
+      {
+        id: "e919d8f1-65c5-4ae2-a4be-29873c0e5782",
+        org_id: orgId,
+        name: "Insurance.pdf",
+        category: "insurance",
+        mime_type: "application/pdf",
+        storage_path: `${orgId}/insurance.pdf`,
+        size_bytes: 200,
+        verified: false,
+        created_at: "2026-11-01T00:00:00Z",
+        expires_on: null,
+      },
+    ],
+  });
+  await openApplication(page);
+  await expect(
+    page.getByRole("button", { name: "Prepare draft with AI", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Record a current expiry date",
+  );
+  for (const expiry of ["2000-01-01", "2099-11-13"]) {
+    await page.goto(`/?view=organisation&org=${orgId}`);
+    await page
+      .getByRole("button", {
+        name: "Edit expiry for Insurance.pdf",
+        exact: true,
+      })
+      .click();
+    await page.getByLabel("Expiry date", { exact: true }).fill(expiry);
+    await page
+      .getByRole("button", { name: "Save expiry", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(state.documents[0].expires_on).toBe(expiry);
+    await openApplication(page);
+    const prepare = page.getByRole("button", {
+      name: "Prepare draft with AI",
+      exact: true,
+    });
+    if (expiry.startsWith("2000")) await expect(prepare).toBeDisabled();
+    else await expect(prepare).toBeEnabled();
+  }
+  expect(state.ai).toEqual([]);
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await page.goto(
+    `/?view=opportunities&org=${orgId}&opportunity=${opportunityId}`,
+  );
+  await expect(page.getByRole("dialog")).toContainText(opportunity.title);
+});
+
+test("a refused expiry update keeps the editor open and mandatory insurance blocked", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page, {
+    grants: [
+      {
+        ...opportunity,
+        guidelines_text:
+          "Applicants must hold current public liability insurance.",
+      },
+    ],
+    documents: [
+      {
+        id: "e919d8f1-65c5-4ae2-a4be-29873c0e5782",
+        org_id: orgId,
+        name: "Insurance.pdf",
+        category: "insurance",
+        mime_type: "application/pdf",
+        storage_path: `${orgId}/insurance.pdf`,
+        size_bytes: 200,
+        verified: false,
+        created_at: "2026-11-01T00:00:00Z",
+        expires_on: null,
+      },
+    ],
+  });
+  state.rejectDocumentExpiry = true;
+  await page.goto(`/?view=organisation&org=${orgId}`);
+  await page
+    .getByRole("button", { name: "Edit expiry for Insurance.pdf", exact: true })
+    .click();
+  await page.getByLabel("Expiry date", { exact: true }).fill("2099-11-13");
+  await page.getByRole("button", { name: "Save expiry", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "could not be saved",
+  );
+  expect(state.documents[0].expires_on).toBeNull();
+  await openApplication(page);
+  await expect(
+    page.getByRole("button", { name: "Prepare draft with AI", exact: true }),
+  ).toBeDisabled();
 });
 
 for (const referenceMode of ["reference", "no-reference"] as const) {
@@ -465,58 +588,59 @@ test("grant selection is in the URL, follows browser history and survives a sign
   expect(page.url()).not.toContain("synthetic-access");
 });
 
-test("a full email confirmation returns to the requested grant in the second organisation", async ({
-  page,
-}) => {
-  await mockGrantWorkspace(page, { signedIn: false });
-  const otherOrganisation = {
-    ...organisation,
-    id: "c63be093-5414-4c8f-bf57-b73b634ee395",
-    name: "Other Community",
-  };
-  await page.route("**/test-grant-organizations", (route) =>
-    route.fulfill({
-      json: { data: [otherOrganisation, organisation], error: null },
-    }),
-  );
-  let next = "";
-  await page.route("**/api/auth-email", (route) => {
-    next = route.request().postDataJSON().next;
-    return route.fulfill({ status: 202, json: { accepted: true } });
-  });
-  const verifications: unknown[] = [];
-  await page.route("**/test-grant-verify", (route) => {
-    verifications.push(route.request().postDataJSON());
-    return route.fulfill({
-      json: {
-        data: { session: { user, access_token: "synthetic-access" } },
-        error: null,
-      },
+for (const key of ["grant", "opportunity"])
+  test(`a full email confirmation preserves a ${key} destination in the second organisation`, async ({
+    page,
+  }) => {
+    await mockGrantWorkspace(page, { signedIn: false });
+    const otherOrganisation = {
+      ...organisation,
+      id: "c63be093-5414-4c8f-bf57-b73b634ee395",
+      name: "Other Community",
+    };
+    await page.route("**/test-grant-organizations", (route) =>
+      route.fulfill({
+        json: { data: [otherOrganisation, organisation], error: null },
+      }),
+    );
+    let next = "";
+    await page.route("**/api/auth-email", (route) => {
+      next = route.request().postDataJSON().next;
+      return route.fulfill({ status: 202, json: { accepted: true } });
     });
+    const verifications: unknown[] = [];
+    await page.route("**/test-grant-verify", (route) => {
+      verifications.push(route.request().postDataJSON());
+      return route.fulfill({
+        json: {
+          data: { session: { user, access_token: "synthetic-access" } },
+          error: null,
+        },
+      });
+    });
+    const destination = `/?view=opportunities&org=${orgId}&grant=${opportunityId}`;
+    await page.goto(destination.replace("&grant=", `&${key}=`));
+    await page
+      .getByRole("textbox", { name: "Your email address", exact: true })
+      .fill(user.email);
+    await page
+      .getByRole("button", { name: "Email me a sign-in link", exact: true })
+      .click();
+    await expect.poll(() => next).toBe(destination);
+    const hash = "synthetic-email-confirmation-hash-123456789";
+    await page.goto(
+      `/auth/confirm#${new URLSearchParams({ token_hash: hash, next })}`,
+    );
+    await expect(page).toHaveURL(/\/auth\/confirm$/);
+    expect(verifications).toEqual([]);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`grant=${opportunityId}$`));
+    await expect(page.locator(".org-switch")).toContainText(organisation.name);
+    await expect(page.getByRole("dialog")).toContainText(opportunity.title);
+    expect(verifications).toEqual([{ token_hash: hash, type: "email" }]);
+    await page.reload();
+    await expect(page.getByRole("dialog")).toContainText(opportunity.title);
   });
-  const destination = `/?view=opportunities&org=${orgId}&grant=${opportunityId}`;
-  await page.goto(destination);
-  await page
-    .getByRole("textbox", { name: "Your email address", exact: true })
-    .fill(user.email);
-  await page
-    .getByRole("button", { name: "Email me a sign-in link", exact: true })
-    .click();
-  await expect.poll(() => next).toBe(destination);
-  const hash = "synthetic-email-confirmation-hash-123456789";
-  await page.goto(
-    `/auth/confirm#${new URLSearchParams({ token_hash: hash, next })}`,
-  );
-  await expect(page).toHaveURL(/\/auth\/confirm$/);
-  expect(verifications).toEqual([]);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`grant=${opportunityId}$`));
-  await expect(page.locator(".org-switch")).toContainText(organisation.name);
-  await expect(page.getByRole("dialog")).toContainText(opportunity.title);
-  expect(verifications).toEqual([{ token_hash: hash, type: "email" }]);
-  await page.reload();
-  await expect(page.getByRole("dialog")).toContainText(opportunity.title);
-});
 
 test("an invalid discovery receipt is rejected without extracting or refreshing partial results", async ({
   page,

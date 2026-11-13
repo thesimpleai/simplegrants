@@ -8,6 +8,18 @@ const views = new Set([
 ]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Older shared links use opportunity; new links use grant. Reject ambiguity. */
+export function opportunityIdFromParams(
+  params: URLSearchParams,
+): string | null {
+  const keys = ["grant", "opportunity"];
+  if (keys.some((key) => params.getAll(key).length > 1)) return null;
+  const values = keys.flatMap((key) => params.getAll(key));
+  if (!values.length || values.some((value) => !uuid.test(value))) return null;
+  const ids = new Set(values.map((value) => value.toLowerCase()));
+  return ids.size === 1 ? [...ids][0] : null;
+}
+
 /** Rebuild only portal query fields; never return an external URL or auth token. */
 export function safeAuthReturnPath(value: unknown): string {
   if (
@@ -32,7 +44,7 @@ export function safeAuthReturnPath(value: unknown): string {
     const view = url.searchParams.get("view");
     if (url.searchParams.getAll("view").length === 1 && view && views.has(view))
       params.set("view", view);
-    for (const key of ["org", "grant"]) {
+    for (const key of ["org"]) {
       const field = url.searchParams.get(key);
       if (
         url.searchParams.getAll(key).length === 1 &&
@@ -41,6 +53,8 @@ export function safeAuthReturnPath(value: unknown): string {
       )
         params.set(key, field.toLowerCase());
     }
+    const grant = opportunityIdFromParams(url.searchParams);
+    if (grant) params.set("grant", grant);
     return params.size ? `/?${params.toString()}` : "/";
   } catch {
     return "/";

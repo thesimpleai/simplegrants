@@ -2,10 +2,46 @@ import { describe, it, expect } from "vitest";
 import {
   parseAuthConfirmationHash,
   safeAuthReturnPath,
+  opportunityIdFromParams,
 } from "../src/lib/auth-links";
 const org = "6a03978d-6266-46b6-b35e-bf8069e50743";
 const grant = "6a03978d-6266-46b6-b35e-bf8069e50744";
 describe("Simple Grants authentication return links", () => {
+  it("preserves legacy opportunity links as canonical grant destinations", () => {
+    const next = `/?view=opportunities&org=${org}&opportunity=${grant}`;
+    expect(safeAuthReturnPath(next)).toBe(
+      `/?view=opportunities&org=${org}&grant=${grant}`,
+    );
+    expect(opportunityIdFromParams(new URLSearchParams(next.slice(2)))).toBe(
+      grant,
+    );
+    const hash = new URLSearchParams({ token_hash: "a".repeat(56), next });
+    expect(parseAuthConfirmationHash(`#${hash}`)?.next).toBe(
+      `/?view=opportunities&org=${org}&grant=${grant}`,
+    );
+  });
+  it("rejects conflicting or repeated opportunity aliases", () => {
+    expect(
+      safeAuthReturnPath(
+        `/?view=opportunities&org=${org}&grant=${grant}&opportunity=${org}`,
+      ),
+    ).toBe(`/?view=opportunities&org=${org}`);
+    expect(
+      opportunityIdFromParams(
+        new URLSearchParams(`opportunity=${grant}&opportunity=${grant}`),
+      ),
+    ).toBeNull();
+    expect(
+      opportunityIdFromParams(
+        new URLSearchParams(`grant=${grant}&opportunity=${grant}`),
+      ),
+    ).toBe(grant);
+    expect(
+      opportunityIdFromParams(
+        new URLSearchParams("opportunity=//untrusted.invalid"),
+      ),
+    ).toBeNull();
+  });
   it("preserves a grant deep link while dropping credentials and unknown params", () => {
     expect(
       safeAuthReturnPath(

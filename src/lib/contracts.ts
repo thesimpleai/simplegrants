@@ -32,7 +32,9 @@ export interface AppContextValue {
   uploadDocuments: (
     files: File[],
     category: string,
+    expiresOn?: string | null,
   ) => Promise<UploadBatchResult>;
+  updateDocumentExpiry: (id: string, expiresOn: string | null) => Promise<void>;
   removeDocument: (id: string) => Promise<void>;
   openDocument: (id: string) => Promise<void>;
   runAI: (

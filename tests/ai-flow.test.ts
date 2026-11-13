@@ -214,6 +214,19 @@ describe("AI handler authentication and required input flow", () => {
 });
 
 describe("original-guideline evidence preflight", () => {
+  it.each([null, "2000-01-01", "2099-02-30"])(
+    "blocks insurance with missing, expired or invalid expiry (%s) before model access",
+    async (expires_on) => {
+      documents = [
+        { name: "Insurance.pdf", category: "insurance", expires_on },
+      ];
+      const response = await call();
+      expect(response.status).toBe(422);
+      expect(JSON.stringify(await response.json())).toContain("expiry date");
+      expect(mocks.generateJSON).not.toHaveBeenCalled();
+      expect(writes).toEqual([]);
+    },
+  );
   it("blocks missing mandatory insurance despite an empty grant-card checklist", async () => {
     documents = [];
     mocks.generateJSON.mockResolvedValueOnce({

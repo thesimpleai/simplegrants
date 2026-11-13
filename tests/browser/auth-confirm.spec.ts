@@ -78,8 +78,9 @@ test("an expired or used token shows a generic error without exposing SDK text o
     error: { message: `upstream-internal-detail ${token}` },
   });
   const next = `/?view=opportunities&org=${org}&grant=${grant}`;
+  const legacyNext = next.replace("&grant=", "&opportunity=");
   await page.goto(
-    `/auth/confirm#token_hash=${token}&next=${encodeURIComponent(next)}`,
+    `/auth/confirm#token_hash=${token}&next=${encodeURIComponent(legacyNext)}`,
   );
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText(

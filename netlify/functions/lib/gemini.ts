@@ -127,7 +127,10 @@ function normaliseChecks(value: unknown) {
 function client() {
   return new GoogleGenAI({
     apiKey: env("GEMINI_API_KEY"),
-    httpOptions: { timeout: 25000, retryOptions: { attempts: 1 } },
+    // Do not set retryOptions, even attempts:1. The installed SDK's retry
+    // adapter discards non-2xx responses before ApiError can retain HTTP status.
+    // Our bounded retry below owns retries and needs the original ApiError.
+    httpOptions: { timeout: 25000 },
   });
 }
 async function generateContent(
@@ -146,6 +149,7 @@ async function generateContent(
         // useful work. Database writes happen after the complete checked result.
         if (
           attempt > 0 ||
+          failure.reason === "TIMEOUT" ||
           budget.remaining() < 8000 ||
           !(
             failure.reason === "NETWORK" ||
@@ -179,7 +183,7 @@ async function generateContentAttempt(
         config: {
           ...parameters.config,
           abortSignal: signal,
-          httpOptions: { timeout: milliseconds, retryOptions: { attempts: 1 } },
+          httpOptions: { timeout: milliseconds },
         },
       }),
       signal,

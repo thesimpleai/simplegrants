@@ -271,33 +271,36 @@ describe("durable anti-abuse checks without external CAPTCHA", () => {
 });
 
 describe("app-specific sign-in email", () => {
-  it("sends only its own canonical callback with token in fragment and validated portal target", async () => {
-    const next =
-      "/?view=opportunities&org=6a03978d-6266-46b6-b35e-bf8069e50743&grant=6a03978d-6266-46b6-b35e-bf8069e50744";
-    const response = await call({
-      email: "member@example.com",
-      next,
-    });
-    expect(response.status).toBe(202);
-    const [message, options] = mocks.send.mock.calls[0];
-    expect(message.from).toBe("Simple Grants <login@simplegrants.com.au>");
-    expect(message.subject).toBe("Your Simple Grants sign-in link");
-    expect(message.to).toBe("member@example.com");
-    const linkText = (message.text as string)
-      .split("\n")
-      .find((line) => line.startsWith("https://"))!;
-    const link = new URL(linkText);
-    expect(link.origin).toBe(origin);
-    expect(link.pathname).toBe("/auth/confirm");
-    expect(link.search).toBe("");
-    const fragment = new URLSearchParams(link.hash.slice(1));
-    expect(fragment.get("token_hash")).toBe(tokenHash);
-    expect(fragment.get("next")).toBe(next);
-    expect(message.html).not.toContain("other-application.example");
-    expect(message.text).not.toContain("DO-NOT-SEND-OTP");
-    expect(options.idempotencyKey).toBe(`simple-grants-auth-${claimId}`);
-    expect(JSON.stringify(await response.json())).not.toContain(tokenHash);
-  });
+  it.each(["grant", "opportunity"])(
+    "sends only its own canonical callback with a validated %s destination",
+    async (key) => {
+      const next =
+        "/?view=opportunities&org=6a03978d-6266-46b6-b35e-bf8069e50743&grant=6a03978d-6266-46b6-b35e-bf8069e50744";
+      const response = await call({
+        email: "member@example.com",
+        next: next.replace("&grant=", `&${key}=`),
+      });
+      expect(response.status).toBe(202);
+      const [message, options] = mocks.send.mock.calls[0];
+      expect(message.from).toBe("Simple Grants <login@simplegrants.com.au>");
+      expect(message.subject).toBe("Your Simple Grants sign-in link");
+      expect(message.to).toBe("member@example.com");
+      const linkText = (message.text as string)
+        .split("\n")
+        .find((line) => line.startsWith("https://"))!;
+      const link = new URL(linkText);
+      expect(link.origin).toBe(origin);
+      expect(link.pathname).toBe("/auth/confirm");
+      expect(link.search).toBe("");
+      const fragment = new URLSearchParams(link.hash.slice(1));
+      expect(fragment.get("token_hash")).toBe(tokenHash);
+      expect(fragment.get("next")).toBe(next);
+      expect(message.html).not.toContain("other-application.example");
+      expect(message.text).not.toContain("DO-NOT-SEND-OTP");
+      expect(options.idempotencyKey).toBe(`simple-grants-auth-${claimId}`);
+      expect(JSON.stringify(await response.json())).not.toContain(tokenHash);
+    },
+  );
   it("never accepts an arbitrary external return URL", async () => {
     await call({
       email: "member@example.com",

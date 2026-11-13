@@ -166,6 +166,35 @@ test("duplicate name, size and normalised MIME are skipped visibly while changed
   expect(state.uploads).toHaveLength(2);
 });
 
+test("insurance uploads save an explicit expiry date with the document", async ({
+  page,
+}) => {
+  const state = await mockWorkspace(page);
+  const input = await library(page);
+  await page
+    .getByRole("combobox", { name: "Document type", exact: true })
+    .selectOption("insurance");
+  await page
+    .getByLabel("Insurance expiry date", { exact: false })
+    .fill("2099-11-13");
+  await input.setInputFiles({
+    name: "insurance.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("synthetic certificate"),
+  });
+  await expect(
+    page.getByRole("status", { name: "Upload results" }),
+  ).toContainText("Saved (1)");
+  expect(state.inserted[0]).toMatchObject({
+    org_id: firstId,
+    category: "insurance",
+    expires_on: "2099-11-13",
+  });
+  await expect(
+    page.locator(".document-row").filter({ hasText: "insurance.pdf" }),
+  ).toContainText("2099");
+});
+
 test("one failed file does not stop later files and the summary names saved and failed files", async ({
   page,
 }) => {

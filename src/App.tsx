@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { useApp } from "./lib/app-context";
+import { opportunityIdFromParams } from "./lib/auth-links";
 import OverviewPage from "./pages/OverviewPage";
 import OpportunitiesPage from "./pages/OpportunitiesPage";
 import ApplicationsPage from "./pages/ApplicationsPage";
@@ -524,8 +525,9 @@ export default function App() {
                 <OpportunitiesPage
                   onApply={() => navigate("applications")}
                   initialId={
-                    new URLSearchParams(window.location.search).get("grant") ??
-                    undefined
+                    opportunityIdFromParams(
+                      new URLSearchParams(window.location.search),
+                    ) ?? undefined
                   }
                   search={search}
                   setSearch={setSearch}

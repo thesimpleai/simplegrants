@@ -14,6 +14,7 @@ import {
   ArrowUpRight,
   Download,
   Mail,
+  CalendarDays,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
 import {
@@ -32,7 +33,9 @@ import type {
   Profile,
   ProfileStage,
   UploadBatchResult,
+  DocumentRecord,
 } from "../types";
+import { isInsuranceCategory } from "../lib/grant-requirements";
 import {
   DOCUMENT_ACCEPT,
   SUPPORTED_DOCUMENT_LABEL,
@@ -106,6 +109,11 @@ export default function OrganisationPage() {
     null,
   );
   const [category, setCategory] = useState("registration");
+  const [uploadExpiry, setUploadExpiry] = useState("");
+  const [editingExpiry, setEditingExpiry] = useState<DocumentRecord | null>(
+    null,
+  );
+  const [expiryValue, setExpiryValue] = useState("");
   const [frequency, setFrequency] = useState<Frequency>("weekly");
   const [create, setCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -119,6 +127,8 @@ export default function OrganisationPage() {
     setWizard(false);
     setError("");
     setUploadReport(null);
+    setEditingExpiry(null);
+    setUploadExpiry("");
   }, [org?.id]);
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
@@ -173,7 +183,13 @@ export default function OrganisationPage() {
     setError("");
     setUploadReport(null);
     try {
-      setUploadReport(await app.uploadDocuments(files, selectedCategory));
+      setUploadReport(
+        await app.uploadDocuments(
+          files,
+          selectedCategory,
+          isInsuranceCategory(selectedCategory) ? uploadExpiry || null : null,
+        ),
+      );
     } catch (error) {
       setError(errorMessage(error));
     } finally {
@@ -606,7 +622,11 @@ export default function OrganisationPage() {
                 Document type
                 <select
                   value={category}
-                  onChange={(e) => setCategory(e.target.value)}
+                  disabled={busy === "upload"}
+                  onChange={(e) => {
+                    setCategory(e.target.value);
+                    setUploadExpiry("");
+                  }}
                 >
                   {categories.map(([value, label]) => (
                     <option key={value} value={value}>
@@ -615,6 +635,20 @@ export default function OrganisationPage() {
                   ))}
                 </select>
               </label>
+              {isInsuranceCategory(category) && (
+                <label className="form-field">
+                  Insurance expiry date
+                  <input
+                    type="date"
+                    value={uploadExpiry}
+                    disabled={busy === "upload"}
+                    onChange={(event) => setUploadExpiry(event.target.value)}
+                  />
+                  <span className="small muted">
+                    Required before drafting a grant that requires insurance.
+                  </span>
+                </label>
+              )}
               <button
                 className="button secondary"
                 disabled={busy === "upload"}
@@ -674,11 +708,25 @@ export default function OrganisationPage() {
                           : `${(document.size_bytes / (1024 * 1024)).toFixed(1)} MB`}
                         {document.expires_on &&
                           ` · Expires ${date(document.expires_on)}`}
+                        {isInsuranceCategory(document.category) &&
+                          !document.expires_on &&
+                          " · Expiry not recorded"}
                       </span>
                     </div>
                     <Badge tone={document.verified ? "green" : "neutral"}>
                       {document.verified ? "Reviewed" : "Uploaded"}
                     </Badge>
+                    <button
+                      className="icon-button"
+                      aria-label={`Edit expiry for ${document.name}`}
+                      onClick={() => {
+                        setEditingExpiry(document);
+                        setExpiryValue(document.expires_on ?? "");
+                        setError("");
+                      }}
+                    >
+                      <CalendarDays size={18} />
+                    </button>
                     <button
                       className="icon-button"
                       aria-label={`${previewable(document) ? "Open" : "Download"} ${document.name}`}
@@ -711,6 +759,62 @@ export default function OrganisationPage() {
             </Notice>
           </section>
         </>
+      )}
+      {editingExpiry && (
+        <Modal
+          title="Document expiry"
+          onClose={() => {
+            if (busy !== "expiry") {
+              setEditingExpiry(null);
+              setError("");
+            }
+          }}
+        >
+          <form
+            className="stack"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (busy) return;
+              setBusy("expiry");
+              setError("");
+              try {
+                await app.updateDocumentExpiry(
+                  editingExpiry.id,
+                  expiryValue || null,
+                );
+                setEditingExpiry(null);
+              } catch (issue) {
+                setError(errorMessage(issue));
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            <p>{editingExpiry.name}</p>
+            <label className="form-field">
+              Expiry date
+              <input
+                type="date"
+                value={expiryValue}
+                disabled={busy === "expiry"}
+                onChange={(event) => setExpiryValue(event.target.value)}
+              />
+            </label>
+            <Notice>
+              Check the date against the original document. Insurance without a
+              recorded current expiry date cannot satisfy a mandatory insurance
+              requirement.
+            </Notice>
+            {error && (
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+            )}
+            <button className="button primary" disabled={busy === "expiry"}>
+              {busy === "expiry" ? <Busy label="Saving…" /> : "Save expiry"}
+            </button>
+          </form>
+        </Modal>
       )}
       {wizard && (
         <Modal

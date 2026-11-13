@@ -2,6 +2,39 @@ import type { DocumentRecord } from "../types";
 
 type EvidenceDocument = Pick<DocumentRecord, "category" | "expires_on">;
 
+export const isInsuranceCategory = (category: string) =>
+  [
+    "insurance",
+    "insurance_certificate",
+    "public_liability",
+    "public_liability_insurance",
+  ].includes(category);
+export function validExpiryDate(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
+  );
+}
+export function hasCurrentInsurance(
+  documents: EvidenceDocument[],
+  now = new Date(),
+): boolean {
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Melbourne",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  return documents.some(
+    (doc) =>
+      isInsuranceCategory(doc.category) &&
+      !!doc.expires_on &&
+      validExpiryDate(doc.expires_on) &&
+      doc.expires_on >= today,
+  );
+}
+
 /** A narrow source-based gate; ambiguous and conditional clauses still need preflight review. */
 export function explicitlyRequiresInsurance(guidelines: string): boolean {
   const clauses = guidelines
@@ -45,31 +78,12 @@ export function draftEvidenceBlockers(
   now = new Date(),
 ): string[] {
   if (!explicitlyRequiresInsurance(guidelines)) return [];
-  const today = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Australia/Melbourne",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
-  const present = documents.some(
-    (document) =>
-      [
-        "insurance",
-        "insurance_certificate",
-        "public_liability",
-        "public_liability_insurance",
-      ].includes(document.category) &&
-      (!document.expires_on ||
-        (/^\d{4}-\d{2}-\d{2}$/.test(document.expires_on) &&
-          !Number.isNaN(Date.parse(`${document.expires_on}T00:00:00Z`)) &&
-          new Date(`${document.expires_on}T00:00:00Z`)
-            .toISOString()
-            .slice(0, 10) === document.expires_on &&
-          document.expires_on >= today)),
-  );
+  const present = hasCurrentInsurance(documents, now);
   return present
     ? []
     : [
-        "The current guidelines require insurance. Upload a current insurance document before preparing a draft.",
+        documents.some((doc) => isInsuranceCategory(doc.category))
+          ? "The current guidelines require insurance. Record a current expiry date for your insurance document in My organisation before preparing a draft."
+          : "The current guidelines require insurance. Upload a current insurance document before preparing a draft.",
       ];
 }
