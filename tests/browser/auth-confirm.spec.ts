@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const token = "test-hash-for-sign-in-confirmation-1234567890";
 const org = "1c27d46e-16e1-4ebf-a6ec-e82f0a9ab3c4";
+const grant = "38995967-20e4-4b21-904d-2153ab67b96f";
 async function mockAuth(
   page: Page,
   result: { data: { session: unknown }; error: unknown },
@@ -32,7 +33,7 @@ test("a confirmation visit clears the fragment and only an explicit click consum
     data: { session: { access_token: "test-session" } },
     error: null,
   });
-  const next = `/?view=opportunities&org=${org}`;
+  const next = `/?view=opportunities&org=${org}&grant=${grant}`;
   await page.goto(
     `/auth/confirm#token_hash=${encodeURIComponent(token)}&next=${encodeURIComponent(next)}`,
   );
@@ -43,7 +44,7 @@ test("a confirmation visit clears the fragment and only an explicit click consum
   expect(calls).toEqual([]);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page).toHaveURL(
-    new RegExp(`\\/\\?view=opportunities&org=${org}$`),
+    new RegExp(`\\/\\?view=opportunities&org=${org}&grant=${grant}$`),
   );
   expect(calls).toEqual([{ token_hash: token, type: "email" }]);
 });
@@ -76,7 +77,10 @@ test("an expired or used token shows a generic error without exposing SDK text o
     data: { session: null },
     error: { message: `upstream-internal-detail ${token}` },
   });
-  await page.goto(`/auth/confirm#token_hash=${token}`);
+  const next = `/?view=opportunities&org=${org}&grant=${grant}`;
+  await page.goto(
+    `/auth/confirm#token_hash=${token}&next=${encodeURIComponent(next)}`,
+  );
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText(
     "Please request a new link.",
@@ -87,6 +91,13 @@ test("an expired or used token shows a generic error without exposing SDK text o
   await expect(page.locator("body")).not.toContainText(token);
   await expect(page).toHaveURL(/\/auth\/confirm$/);
   expect(calls).toHaveLength(1);
+  await expect(
+    page.getByRole("link", { name: "Back to sign-in" }),
+  ).toHaveAttribute("href", next);
+  await page.getByRole("link", { name: "Back to sign-in" }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`\\/\\?view=opportunities&org=${org}&grant=${grant}$`),
+  );
 });
 
 test("a response without a session cannot complete sign-in", async ({

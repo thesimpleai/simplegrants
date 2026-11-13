@@ -72,6 +72,7 @@ async function mockGrantWorkspace(
     grants?: Opportunity[];
     documents?: DocumentRecord[];
     application?: Application;
+    signedIn?: boolean;
   } = {},
 ) {
   const state = {
@@ -87,9 +88,9 @@ async function mockGrantWorkspace(
     route.fulfill({
       contentType: "application/javascript",
       body: `export const configured=true;
-const user=${JSON.stringify(user)};let callback;let signedIn=true;
+const user=${JSON.stringify(user)};let callback;let signedIn=${changes.signedIn ?? true} || sessionStorage.getItem('test-grant-signed-in')==='true';
 window.__changeGrantUser=next=>{signedIn=!!next;callback?.(next?'SIGNED_IN':'SIGNED_OUT',next?{user:next,access_token:'synthetic-access'}:null)};
-export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,access_token:'synthetic-access'}:null},error:null}),onAuthStateChange:cb=>{callback=cb;return {data:{subscription:{unsubscribe(){if(callback===cb)callback=null}}}}},signOut:async options=>{await fetch('/test-grant-signout',{method:'POST',body:JSON.stringify(options)});window.__changeGrantUser(null);return {error:null}}},from:table=>({select:()=>({order:async()=>(await fetch('/test-grant-organizations')).json(),eq:async(field,id)=>(await fetch('/test-grant-records?table='+table+'&org='+id)).json()}),update:patch=>({eq:(field,id)=>({eq:async()=>(await fetch('/test-grant-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,id,patch})})).json()})})})};`,
+export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,access_token:'synthetic-access'}:null},error:null}),verifyOtp:async input=>{const result=await(await fetch('/test-grant-verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)})).json();if(result.data.session)sessionStorage.setItem('test-grant-signed-in','true');return result;},onAuthStateChange:cb=>{callback=cb;return {data:{subscription:{unsubscribe(){if(callback===cb)callback=null}}}}},signOut:async options=>{await fetch('/test-grant-signout',{method:'POST',body:JSON.stringify(options)});window.__changeGrantUser(null);return {error:null}}},from:table=>({select:()=>({order:async()=>(await fetch('/test-grant-organizations')).json(),eq:async(field,id)=>(await fetch('/test-grant-records?table='+table+'&org='+id)).json()}),update:patch=>({eq:(field,id)=>({eq:async()=>(await fetch('/test-grant-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,id,patch})})).json()})})})};`,
     }),
   );
   await page.route("**/test-grant-organizations", (route) =>
@@ -464,6 +465,59 @@ test("grant selection is in the URL, follows browser history and survives a sign
   expect(page.url()).not.toContain("synthetic-access");
 });
 
+test("a full email confirmation returns to the requested grant in the second organisation", async ({
+  page,
+}) => {
+  await mockGrantWorkspace(page, { signedIn: false });
+  const otherOrganisation = {
+    ...organisation,
+    id: "c63be093-5414-4c8f-bf57-b73b634ee395",
+    name: "Other Community",
+  };
+  await page.route("**/test-grant-organizations", (route) =>
+    route.fulfill({
+      json: { data: [otherOrganisation, organisation], error: null },
+    }),
+  );
+  let next = "";
+  await page.route("**/api/auth-email", (route) => {
+    next = route.request().postDataJSON().next;
+    return route.fulfill({ status: 202, json: { accepted: true } });
+  });
+  const verifications: unknown[] = [];
+  await page.route("**/test-grant-verify", (route) => {
+    verifications.push(route.request().postDataJSON());
+    return route.fulfill({
+      json: {
+        data: { session: { user, access_token: "synthetic-access" } },
+        error: null,
+      },
+    });
+  });
+  const destination = `/?view=opportunities&org=${orgId}&grant=${opportunityId}`;
+  await page.goto(destination);
+  await page
+    .getByRole("textbox", { name: "Your email address", exact: true })
+    .fill(user.email);
+  await page
+    .getByRole("button", { name: "Email me a sign-in link", exact: true })
+    .click();
+  await expect.poll(() => next).toBe(destination);
+  const hash = "synthetic-email-confirmation-hash-123456789";
+  await page.goto(
+    `/auth/confirm#${new URLSearchParams({ token_hash: hash, next })}`,
+  );
+  await expect(page).toHaveURL(/\/auth\/confirm$/);
+  expect(verifications).toEqual([]);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`grant=${opportunityId}$`));
+  await expect(page.locator(".org-switch")).toContainText(organisation.name);
+  await expect(page.getByRole("dialog")).toContainText(opportunity.title);
+  expect(verifications).toEqual([{ token_hash: hash, type: "email" }]);
+  await page.reload();
+  await expect(page.getByRole("dialog")).toContainText(opportunity.title);
+});
+
 test("an invalid discovery receipt is rejected without extracting or refreshing partial results", async ({
   page,
 }) => {
@@ -524,8 +578,11 @@ test("a changed signed-in user stops discovery before the next stage", async ({
     }),
   );
   releaseSearch();
+  await expect(page.locator(".grant-card")).toHaveCount(1);
   await expect(
-    page.getByRole("button", { name: "Find grants with AI", exact: true }),
+    page
+      .locator(".page-heading")
+      .getByRole("button", { name: "Find grants with AI", exact: true }),
   ).toBeEnabled();
   expect(state.ai).toHaveLength(1);
 });

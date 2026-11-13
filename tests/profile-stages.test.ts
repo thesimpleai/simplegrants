@@ -437,7 +437,7 @@ describe("bounded AI failures", () => {
     "classifies provider status$status without leaking its payload",
     async ({ status, code, http }) => {
       const canary = "PRIVATE-DOCUMENT-EMAIL-BANK-TOKEN-APIKEY-CANARY";
-      mocks.generateContent.mockRejectedValueOnce(
+      mocks.generateContent.mockRejectedValue(
         Object.assign(new Error(canary), {
           status,
           body: canary,

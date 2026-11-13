@@ -109,7 +109,7 @@ export default function AuthConfirm({
               and request a new email link.
             </p>
           )}
-          <a className="text-link" href="/">
+          <a className="text-link" href={safeAuthReturnPath(link?.next ?? "/")}>
             Back to sign-in
           </a>
         </div>

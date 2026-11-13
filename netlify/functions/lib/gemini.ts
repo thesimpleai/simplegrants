@@ -30,6 +30,7 @@ import {
   waitForAISignal,
   type AIRequestBudget,
   createAIRequestBudget,
+  providerFailure,
 } from "./ai-runtime";
 import type {
   DocumentRecord,
@@ -133,16 +134,44 @@ async function generateContent(
   parameters: GenerateContentParameters,
   budget?: AIRequestBudget,
 ) {
-  budget?.assert();
+  const ownedBudget = budget ? undefined : createAIRequestBudget();
+  budget ??= ownedBudget!;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await generateContentAttempt(parameters, budget);
+      } catch (error) {
+        const failure = providerFailure(error);
+        // Only retry a transient provider call, at most once, leaving time for
+        // useful work. Database writes happen after the complete checked result.
+        if (
+          attempt > 0 ||
+          budget.remaining() < 8000 ||
+          !(
+            failure.reason === "NETWORK" ||
+            [500, 502, 503].includes(failure.status ?? 0)
+          )
+        )
+          throw error;
+        await budget.read(new Promise((resolve) => setTimeout(resolve, 250)));
+      }
+    }
+  } finally {
+    ownedBudget?.close();
+  }
+}
+async function generateContentAttempt(
+  parameters: GenerateContentParameters,
+  budget: AIRequestBudget,
+) {
+  budget.assert();
   const milliseconds = Math.max(
     1,
-    Math.min(25000, Math.max(1, (budget?.remaining() ?? 25500) - 500)),
+    Math.min(25000, Math.max(1, budget.remaining() - 500)),
   );
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), milliseconds);
-  const signal = budget
-    ? AbortSignal.any([controller.signal, budget.signal])
-    : controller.signal;
+  const signal = AbortSignal.any([controller.signal, budget.signal]);
   try {
     const result = await waitForAISignal(
       client().models.generateContent({
@@ -155,7 +184,7 @@ async function generateContent(
       }),
       signal,
     );
-    budget?.assert();
+    budget.assert();
     return result;
   } finally {
     clearTimeout(timer);
@@ -178,13 +207,16 @@ function compatibleThinking(model: string) {
     return { thinkingLevel: ThinkingLevel.MINIMAL };
   return undefined; // In particular, a moving alias must not receive model-specific flags.
 }
+// A deployment can pin a model after verifying its availability with its key.
+// Do not silently switch an existing installation to an untested model/version.
+const defaultModel = "gemini-flash-latest";
 export async function generateJSON(
   prompt: string,
   parts: Part[] = [],
   budget?: AIRequestBudget,
   output: JSONOutput = {},
 ) {
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const model = process.env.GEMINI_MODEL || defaultModel;
   const result = await generateContent(
     {
       model,
@@ -331,10 +363,10 @@ export async function extractProfileStage(
     );
   const existingContext = `Existing user-entered profile is CONTEXT ONLY, NOT SOURCE EVIDENCE. Do not retain a field merely because it occurs here: ${JSON.stringify(stripSensitive(org.profile))}`;
   const extracted = await generateJSON(
-    `Extract an organisation profile ONLY from the supplied evidence. Return {"profile":{"name":"","legal_name":"","abn":"","type":"","state":"","description":"","focus_areas":[],"website":""},"evidence":[{"field":"","source":"","quote":""}],"missing_information":[]}. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
+    `Extract an organisation profile ONLY from the supplied evidence. Keep the description concise (at most 1200 characters). Provide at most 12 representative evidence quotes of at most 240 characters each; never reproduce whole source passages. Return {"profile":{"name":"","legal_name":"","abn":"","type":"","state":"","description":"","focus_areas":[],"website":""},"evidence":[{"field":"","source":"","quote":""}],"missing_information":[]}. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: extractOutputSchema, maxOutputTokens: 2048 },
+    { schema: extractOutputSchema, maxOutputTokens: 4096 },
   );
   return {
     profileDraft: normaliseProfile(extracted.profile),
@@ -356,7 +388,7 @@ export async function verifyProfileStage(
     `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: verifyOutputSchema, maxOutputTokens: 2048 },
+    { schema: verifyOutputSchema, maxOutputTokens: 4096 },
   );
   return {
     profileDraft: draft,
@@ -376,10 +408,10 @@ export async function correctProfileStage(
   const draft = profileSchema.parse(profileDraft),
     checks = checksSchema.parse(profileChecks);
   const corrected = await generateJSON(
-    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Consider every verification finding. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Keep the description concise (at most 1200 characters), and provide at most 12 representative evidence quotes of at most 240 characters each. Consider every verification finding and preserve every unresolved check. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: correctOutputSchema, maxOutputTokens: 3072 },
+    { schema: correctOutputSchema, maxOutputTokens: 6144 },
   );
   const profile: Profile = normaliseProfile(corrected.profile);
   const finalChecks = normaliseChecks(corrected.checks ?? checks);
@@ -465,15 +497,19 @@ export async function searchOpportunitySources(
   budget?: AIRequestBudget,
 ) {
   budget?.assert();
+  const model = process.env.GEMINI_MODEL || defaultModel;
   const result = await generateContent(
     {
-      model: process.env.GEMINI_MODEL || "gemini-flash-latest",
+      model,
       contents: `Find up to 6 current Australian grant opportunities suitable for this organisation, as of ${new Date().toISOString().slice(0, 10)}. Use web search, primary grant providers, real currently-open or forthcoming rounds. Cite sources for each. State amounts, open and closing dates including timezone ONLY when explicitly available. Do not invent deadlines or suggest expired rounds. Explain uncertainty and mandatory requirements. Public organisation profile: ${JSON.stringify(stripSensitive({ name: org.name, type: org.type, state: org.state, description: org.description, focus_areas: org.focus_areas }))}`,
       config: {
         systemInstruction: instructions,
         tools: [{ googleSearch: {} }],
         temperature: 0.1,
         maxOutputTokens: 4096,
+        ...(compatibleThinking(model)
+          ? { thinkingConfig: compatibleThinking(model) }
+          : {}),
       },
     },
     budget,

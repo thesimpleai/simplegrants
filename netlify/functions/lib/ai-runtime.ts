@@ -97,6 +97,46 @@ function isProviderTimeout(error: unknown, depth = 0): boolean {
     depth < 2 && !!record.cause && isProviderTimeout(record.cause, depth + 1)
   );
 }
+/** Classify SDK wrappers without retaining provider messages, URLs or payloads. */
+export function providerFailure(
+  error: unknown,
+  depth = 0,
+): {
+  status?: number;
+  reason: "TIMEOUT" | "NETWORK" | "PROVIDER" | "OTHER";
+} {
+  if (isProviderTimeout(error)) return { reason: "TIMEOUT" };
+  if (!error || typeof error !== "object" || error instanceof HttpError)
+    return { reason: "OTHER" };
+  const record = error as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  };
+  if (
+    typeof record.status === "number" &&
+    [400, 401, 403, 404, 408, 413, 415, 429, 500, 502, 503, 504].includes(
+      record.status,
+    )
+  )
+    return { status: record.status, reason: "PROVIDER" };
+  if (
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "EAI_AGAIN",
+      "ENETUNREACH",
+      "UND_ERR_SOCKET",
+    ].includes(String(record.code ?? "")) ||
+    (typeof record.message === "string" &&
+      /\b(?:fetch failed|network error|socket hang up)\b/i.test(record.message))
+  )
+    return { reason: "NETWORK" };
+  return depth < 2 && record.cause
+    ? providerFailure(record.cause, depth + 1)
+    : { reason: "OTHER" };
+}
 /** Only fixed stages and numeric provider status are recorded, never provider messages or source material. */
 export function aiFailureResponse(
   error: unknown,
@@ -105,20 +145,8 @@ export function aiFailureResponse(
 ) {
   if (error instanceof HttpError && error.status < 500 && error.status !== 429)
     return json({ error: error.message }, error.status);
-  const object = error && typeof error === "object" ? error : {};
-  const rawStatus =
-    !(error instanceof HttpError) &&
-    "status" in object &&
-    typeof object.status === "number"
-      ? object.status
-      : undefined;
-  const providerStatus =
-    rawStatus &&
-    [400, 401, 403, 404, 408, 413, 415, 429, 500, 502, 503, 504].includes(
-      rawStatus,
-    )
-      ? rawStatus
-      : undefined;
+  const failure = providerFailure(error);
+  const providerStatus = failure.status;
   const timeout =
     budget.signal.aborted ||
     budget.remaining() === 0 ||
@@ -173,7 +201,7 @@ export function aiFailureResponse(
         ? "SCHEMA_MISMATCH"
         : timeout
           ? "TIMEOUT"
-          : "OTHER";
+          : failure.reason;
   console.error("Simple Grants AI step unavailable", {
     stage,
     code,

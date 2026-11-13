@@ -473,6 +473,129 @@ describe("signed, separate application preparation", () => {
   });
 });
 describe("bounded structured model reliability", () => {
+  it("applies the configured concrete model's thinking controls to extraction and grounded search", async () => {
+    vi.stubEnv("GEMINI_MODEL", "gemini-2.5-flash");
+    model({ profile: { name: "Community Club" } });
+    expect(
+      (
+        await call({
+          action: "profile",
+          profileStage: "extract",
+          text: "Original registration",
+        })
+      ).status,
+    ).toBe(200);
+    search();
+    expect((await call({ discoveryStage: "search" })).status).toBe(200);
+    for (const [request] of mocks.generateContent.mock.calls) {
+      expect(request.model).toBe("gemini-2.5-flash");
+      expect(request.config.thinkingConfig).toEqual({ thinkingBudget: 0 });
+    }
+  });
+  it.each([
+    Object.assign(new Error("private provider payload"), { status: 503 }),
+    new Error("SDK wrapper", { cause: { status: 502 } }),
+    new Error(
+      "exception TypeError: fetch failed sending request private-canary",
+    ),
+  ])(
+    "recovers once from a quick transient failure within the same quota claim",
+    async (error) => {
+      mocks.generateContent.mockRejectedValueOnce(error);
+      model({ profile: { name: "Community Club" } });
+      const pending = call({
+        action: "profile",
+        profileStage: "extract",
+        text: "Original registration",
+      });
+      await vi.advanceTimersByTimeAsync(250);
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect((await response.json()).profileDraft.name).toBe("Community Club");
+      expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+      expect(mocks.rpc).toHaveBeenCalledTimes(1);
+      expect(mocks.write).not.toHaveBeenCalled();
+      expect(console.error).not.toHaveBeenCalled();
+    },
+  );
+  it("never retries more than once and logs a fixed network category without the SDK payload", async () => {
+    mocks.generateContent.mockRejectedValue(
+      new Error("fetch failed PRIVATE-NETWORK-CANARY"),
+    );
+    const pending = call({
+      action: "profile",
+      profileStage: "extract",
+      text: "Original registration",
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    const response = await pending;
+    expect(response.status).toBe(503);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants AI step unavailable",
+      expect.objectContaining({ failureReason: "NETWORK" }),
+    );
+    expect(JSON.stringify(await response.json())).not.toContain(
+      "PRIVATE-NETWORK-CANARY",
+    );
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      "PRIVATE-NETWORK-CANARY",
+    );
+  });
+  it.each([400, 401, 403, 404, 429, 504])(
+    "does not retry provider status %s",
+    async (status) => {
+      mocks.generateContent.mockRejectedValue(
+        Object.assign(new Error("private"), { status }),
+      );
+      await call({
+        action: "profile",
+        profileStage: "extract",
+        text: "Original registration",
+      });
+      expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+      expect(mocks.write).not.toHaveBeenCalled();
+    },
+  );
+  it("does not retry a late transient failure with insufficient request time remaining", async () => {
+    mocks.generateContent.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          setTimeout(
+            () =>
+              reject(Object.assign(new Error("late failure"), { status: 503 })),
+            21000,
+          );
+        }),
+    );
+    const pending = call({
+      action: "profile",
+      profileStage: "extract",
+      text: "Original registration",
+    });
+    await vi.advanceTimersByTimeAsync(21000);
+    expect((await pending).status).toBe(503);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+  });
+  it("retries draft generation without repeating preflight, quota claims or the application write", async () => {
+    const state = await preflight();
+    mocks.generateContent.mockRejectedValueOnce(
+      Object.assign(new Error("transient"), { status: 503 }),
+    );
+    model(validDraft());
+    const pending = call({
+      action: "draft",
+      draftStage: "generate",
+      opportunityId: grantId,
+      applicationId: appId,
+      ...state,
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await pending).status).toBe(200);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3);
+    expect(mocks.rpc).toHaveBeenCalledTimes(2);
+    expect(mocks.write).toHaveBeenCalledTimes(1);
+  });
   it("allows a genuine20s single pass that the old18s limit killed", async () => {
     mocks.generateContent.mockImplementationOnce(
       () =>
@@ -533,7 +656,7 @@ describe("bounded structured model reliability", () => {
     expect(configuration.responseJsonSchema).toHaveProperty(
       "properties.profile",
     );
-    expect(configuration.maxOutputTokens).toBe(2048);
+    expect(configuration.maxOutputTokens).toBe(4096);
     expect(configuration).not.toHaveProperty("thinkingConfig");
   });
   it.each([
