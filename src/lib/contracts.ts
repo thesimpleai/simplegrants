@@ -50,6 +50,11 @@ export interface AppContextValue {
     onProgress?: (stage: ProfileStage) => void,
   ) => Promise<AIResult>;
   refresh: () => Promise<void>;
+  repairSourceLinks: () => Promise<{
+    repaired: number;
+    unresolved: number;
+    hasMore: boolean;
+  }>;
   saveOpportunity: (
     patch: Partial<Opportunity> & { id: string },
   ) => Promise<void>;

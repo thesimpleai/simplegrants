@@ -1,3 +1,4 @@
+import { requestAIPhase } from "./ai-transport";
 import {
   createContext,
   useContext,
@@ -639,6 +640,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (error) throw error;
     window.open(link.signedUrl, "_blank", "noopener,noreferrer");
   }
+  async function repairSourceLinks() {
+    if (!supabase || !orgId)
+      return { repaired: 0, unresolved: 0, hasMore: false };
+    const targetOrg = orgId,
+      targetUser = currentUserId.current;
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (
+      !session ||
+      session.user.id !== targetUser ||
+      activeOrg.current !== targetOrg
+    )
+      throw new Error("Please sign in again to refresh saved source links.");
+    const response = await fetch("/api/repair-sources", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ orgId: targetOrg }),
+      signal: AbortSignal.timeout(25000),
+    });
+    const result = await response.json();
+    if (activeOrg.current !== targetOrg || currentUserId.current !== targetUser)
+      throw new Error("Your selected organisation or sign-in changed.");
+    if (
+      !response.ok ||
+      !Number.isInteger(result.repaired) ||
+      !Number.isInteger(result.unresolved) ||
+      typeof result.hasMore !== "boolean"
+    )
+      throw new Error(
+        typeof result.error === "string"
+          ? result.error
+          : "Saved source links could not be refreshed.",
+      );
+    if (result.repaired) await refresh();
+    return result as { repaired: number; unresolved: number; hasMore: boolean };
+  }
   async function runAI(
     payload: Parameters<AppContextValue["runAI"]>[0],
     onProgress?: (stage: ProfileStage) => void,
@@ -758,15 +799,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ensureCurrent();
       let response: Response;
       try {
-        response = await fetch("/api/ai", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session!.access_token}`,
-          },
-          body: JSON.stringify({ ...original, ...extra }),
-          signal: AbortSignal.timeout(45000),
-        });
+        response = await requestAIPhase(
+          { ...original, ...extra },
+          session!.access_token,
+          ensureCurrent,
+        );
       } catch (error) {
         ensureCurrent();
         throw failure(
@@ -1290,6 +1327,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         openDocument,
         runAI,
         refresh,
+        repairSourceLinks,
         saveOpportunity,
         startApplication,
         updateApplication,

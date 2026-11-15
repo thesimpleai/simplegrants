@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Bookmark,
@@ -26,6 +26,18 @@ import {
   money,
   errorMessage,
 } from "../components/ui";
+function legacySource(url: string) {
+  try {
+    const value = new URL(url);
+    return (
+      value.protocol === "https:" &&
+      value.hostname === "vertexaisearch.cloud.google.com" &&
+      value.pathname.startsWith("/grounding-api-redirect/")
+    );
+  } catch {
+    return false;
+  }
+}
 function sourceStatus(opportunity: Opportunity): {
   label: string;
   tone: string;
@@ -40,6 +52,11 @@ function sourceStatus(opportunity: Opportunity): {
   } catch {
     /* An absent or invalid link is not a found source. */
   }
+  if (legacySource(opportunity.source_url))
+    return {
+      label: "Source link needs refreshing · check details",
+      tone: "cream",
+    };
   const citations = opportunity.provenance.sources;
   const grounded =
     sourceUrl &&
@@ -89,6 +106,43 @@ export default function OpportunitiesPage({
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [sort, setSort] = useState("recommended");
+  const attemptedRepair = useRef(new Set<string>());
+  const [repairing, setRepairing] = useState(false);
+  const repairActor = useRef("");
+  repairActor.current = `${app.user?.id}:${app.org?.id}`;
+  useEffect(() => setRepairing(false), [app.user?.id, app.org?.id]);
+  const hasLegacySources = app.data.opportunities.some((item) =>
+    legacySource(item.source_url),
+  );
+  async function repairSources(automatic = false) {
+    const actor = `${app.user?.id}:${app.org?.id}`;
+    setRepairing(true);
+    try {
+      const result = await app.repairSourceLinks();
+      if (actor !== repairActor.current) return;
+      if (result.repaired)
+        app.notify(
+          `${result.repaired} saved source link${result.repaired === 1 ? "" : "s"} refreshed.`,
+        );
+      if (!automatic && result.unresolved)
+        setError(
+          "Some older source links could not be resolved. Check the funder’s official website before using them.",
+        );
+    } catch (error) {
+      if (!automatic && actor === repairActor.current)
+        setError(errorMessage(error));
+    } finally {
+      if (actor === repairActor.current) setRepairing(false);
+    }
+  }
+  useEffect(() => {
+    if (app.mode !== "live" || !app.user || !app.org || !hasLegacySources)
+      return;
+    const actor = `${app.user.id}:${app.org.id}`;
+    if (attemptedRepair.current.has(actor)) return;
+    attemptedRepair.current.add(actor);
+    void repairSources(true);
+  }, [app.mode, app.user?.id, app.org?.id, hasLegacySources]);
   const opportunity = app.data.opportunities.find(
     (o) => o.id === selected && o.org_id === app.org?.id,
   );
@@ -229,6 +283,17 @@ export default function OpportunitiesPage({
           </p>
         </div>
         <div className="button-group">
+          {hasLegacySources && app.mode === "live" && (
+            <button
+              className="button secondary"
+              disabled={repairing}
+              onClick={() => void repairSources()}
+            >
+              {repairing
+                ? "Refreshing source links…"
+                : "Refresh saved source links"}
+            </button>
+          )}
           <button
             className="button secondary"
             onClick={() => {

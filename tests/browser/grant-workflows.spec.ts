@@ -804,3 +804,98 @@ test("a changed signed-in user stops discovery before the next stage", async ({
   ).toBeEnabled();
   expect(state.ai).toHaveLength(1);
 });
+
+test("background draft stages poll without repeating model requests", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page);
+  const jobs = new Map<
+    string,
+    { body: Record<string, unknown>; polls: number }
+  >();
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    expect(route.request().headers()["x-simple-grants-async"]).toBe("1");
+    const jobId =
+      body.draftStage === "preflight"
+        ? "7b766b0e-4e32-4e3e-b0a5-75b1ee07b59e"
+        : "7b766b0e-4e32-4e3e-b0a5-75b1ee07b59f";
+    jobs.set(jobId, { body, polls: 0 });
+    return route.fulfill({ status: 202, json: { orgId, jobId } });
+  });
+  await page.route("**/api/ai-jobs?*", (route) => {
+    const jobId = new URL(route.request().url()).searchParams.get("jobId")!;
+    const job = jobs.get(jobId)!;
+    if (++job.polls === 1)
+      return route.fulfill({
+        status: 202,
+        json: { orgId, jobId, pending: true },
+      });
+    if (job.body.draftStage === "preflight")
+      return route.fulfill({
+        json: {
+          draftRequirements: { documents: [], information: [] },
+          sourceFingerprint: fingerprint,
+          stageIssuedAt: Date.now(),
+        },
+      });
+    state.application.draft = {
+      application_text: "Finished background draft for authorised review.",
+    };
+    return route.fulfill({ json: { draft: state.application.draft } });
+  });
+  await openApplication(page);
+  await page
+    .getByRole("button", { name: "Prepare draft with AI", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Your application draft", exact: true }),
+  ).toHaveValue(/Finished background draft for authorised review\./, {
+    timeout: 15000,
+  });
+  expect(state.ai.map((body) => body.draftStage)).toEqual([
+    "preflight",
+    "generate",
+  ]);
+  expect([...jobs.values()].map((job) => job.polls)).toEqual([2, 2]);
+});
+
+test("opening opportunities repairs an older source link without an AI request", async ({
+  page,
+}) => {
+  const old =
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/legacy";
+  const real = "https://www.opengardensvictoria.org.au/grants";
+  const state = await mockGrantWorkspace(page, {
+    grants: [
+      {
+        ...opportunity,
+        source_url: old,
+        provenance: {
+          method: "google_search_grounding",
+          sources: [{ uri: old }],
+        },
+      },
+    ],
+  });
+  let repairs = 0;
+  await page.route("**/api/repair-sources", (route) => {
+    repairs++;
+    expect(route.request().postDataJSON()).toEqual({ orgId });
+    state.grants[0].source_url = real;
+    state.grants[0].provenance.sources = [{ uri: real, grounding_uri: old }];
+    return route.fulfill({
+      json: { repaired: 1, unresolved: 0, hasMore: false },
+    });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await expect(
+    page.getByText("1 saved source link refreshed.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".grant-card").first()).toContainText(
+    "Web source found · check eligibility",
+  );
+  expect(repairs).toBe(1);
+  expect(state.ai).toHaveLength(0);
+});

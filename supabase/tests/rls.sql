@@ -7,6 +7,9 @@ insert into auth.users(id, email) values
  ('10000000-0000-4000-8000-000000000002', 'owner-b@example.invalid'),
  ('10000000-0000-4000-8000-000000000003', 'viewer@example.invalid');
 
+-- Background jobs live outside every tenant UUID prefix, even for their owner.
+insert into storage.objects(bucket_id,name) values ('simple-grant-documents','.ai-jobs/private-org/private-job/result.json');
+
 set local role authenticated;
 select set_config('request.jwt.claim.role','authenticated',true);
 select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000001', true);
@@ -65,6 +68,19 @@ begin
   exception when check_violation then null;
   end;
   insert into storage.objects(bucket_id,name) values ('simple-grant-documents',v_org::text||'/evidence.pdf');
+  if exists (select 1 from storage.objects where bucket_id = 'simple-grant-documents' and name like '.ai-jobs/%') then
+    raise exception 'Authenticated owner could read server-only AI jobs';
+  end if;
+  update storage.objects set name = name where bucket_id = 'simple-grant-documents' and name like '.ai-jobs/%';
+  if found then raise exception 'Authenticated owner could modify server-only AI jobs'; end if;
+  delete from storage.objects where bucket_id = 'simple-grant-documents' and name like '.ai-jobs/%';
+  if found then raise exception 'Authenticated owner could delete server-only AI jobs'; end if;
+  begin
+    insert into storage.objects(bucket_id,name) values ('simple-grant-documents','.ai-jobs/forged/job/result.json');
+    raise exception 'Authenticated owner could forge a server-only AI job';
+  exception when insufficient_privilege then null;
+  end;
+
   if (select count(*) from storage.objects where bucket_id = 'simple-grant-documents' and name = v_org::text||'/evidence.pdf') <> 1 then
     raise exception 'Owner cannot read own SG evidence';
   end if;

@@ -33,6 +33,7 @@ import {
 } from "./lib/ai-receipt";
 import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
 import type { Profile, DocumentRecord, Opportunity } from "../../src/types";
+import { queueAIJob } from "./lib/ai-jobs";
 
 const draftOutputSchema = z.object({
   title: z.string().max(500).optional(),
@@ -91,8 +92,10 @@ const bodySchema = z.object({
     .regex(/^[0-9a-f]{64}$/)
     .optional(),
 });
-export default async (request: Request) => {
-  const budget = createAIRequestBudget();
+export async function executeAI(
+  request: Request,
+  budget = createAIRequestBudget(),
+) {
   let stage = "request";
   try {
     if (request.method !== "POST")
@@ -204,6 +207,11 @@ export default async (request: Request) => {
       ),
     );
     env("GEMINI_API_KEY");
+    if (
+      request.headers.get("x-simple-grants-async") === "1" &&
+      body.action !== "ask"
+    )
+      return await queueAIJob(request, body, user.id);
     async function claimQuota() {
       const previousStage = stage;
       stage = "quota";
@@ -441,6 +449,11 @@ export default async (request: Request) => {
           new Date(),
           budget,
           parts,
+          stripSensitive({
+            ...org.profile,
+            name: org.name,
+            description: org.profile?.description || org.description,
+          }),
         );
         if (preflight.blockers.length)
           return json(
@@ -606,4 +619,5 @@ export default async (request: Request) => {
   } finally {
     budget.close();
   }
-};
+}
+export default executeAI;

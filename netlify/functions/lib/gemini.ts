@@ -180,7 +180,10 @@ async function generateContentAttempt(
   budget.assert();
   const milliseconds = Math.max(
     1,
-    Math.min(25000, Math.max(1, budget.remaining() - 500)),
+    Math.min(
+      budget.modelTimeoutMs ?? 25000,
+      Math.max(1, budget.remaining() - 500),
+    ),
   );
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), milliseconds);

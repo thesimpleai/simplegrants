@@ -324,6 +324,17 @@ describe("signed, separate application preparation", () => {
     const state = await preflight();
     expect(mocks.write).not.toHaveBeenCalled();
     expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+    const prompt = JSON.stringify(
+      mocks.generateContent.mock.calls[0][0].contents,
+    );
+    expect(prompt).toContain("APPROVED ORGANISATION PROFILE");
+    expect(prompt).toContain(
+      (org.profile as { description: string }).description,
+    );
+    expect(prompt).toContain(
+      "does not establish project-specific community need",
+    );
+
     model(validDraft());
     const response = await call({
       action: "draft",

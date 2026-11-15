@@ -36,6 +36,8 @@ Read **[Deployment instructions](docs/DEPLOYMENT.md)** for Netlify settings, all
 
 The frontend uses React, TypeScript and Vite. Netlify Functions hold the Gemini and Resend keys. Supabase supplies Auth, Postgres and private Storage. Use Node 22 or later.
 
+Long AI phases run in Netlify Background Functions with a 90-second model deadline and browser progress polling. Temporary jobs use a server-only prefix in the existing private bucket and expire after 15 minutes, with hourly cleanup. No new migration or environment variable is needed.
+
 Profile preparation uses three authenticated AI requests; discovery and application drafting each use two. Every claimed phase counts toward the shared 60-request daily user budget. A failed flow restarts from its first phase, preserving saved source records; early phases do not save partial search results or application drafts.
 
 For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
@@ -65,7 +67,7 @@ Official Australian source pages were blocked by the development environment’s
 
 ## Validation
 
-See the [16 November QA readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
+See the [round 5 QA readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
 
 ```sh
 npm test                 # backend evidence/security and draft rendering

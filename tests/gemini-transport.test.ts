@@ -60,6 +60,24 @@ const success = () =>
   );
 
 describe("real Gemini SDK HTTP failure handling", () => {
+  it("allows a background request to finish after 35 seconds using the real SDK", async () => {
+    fetchMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 35000));
+      return success();
+    });
+    const budget = createAIRequestBudget(120000, 90000);
+    try {
+      const work = generateJSON("Synthetic background profile", [], budget);
+      await vi.advanceTimersByTimeAsync(35000);
+      expect(await work).toEqual({ profile: { name: "Synthetic Community" } });
+      const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+      expect(headers.get("x-server-timeout")).toBe("90");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      budget.close();
+    }
+  });
+
   it("sends profile verification and draft preflight through the native Gemini schema contract", async () => {
     const outputs = [
       { checks: [], verified_fields: [] },

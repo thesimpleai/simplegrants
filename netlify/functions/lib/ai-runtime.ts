@@ -18,6 +18,7 @@ export class AIExecutionError extends Error {
 }
 export interface AIRequestBudget {
   signal: AbortSignal;
+  modelTimeoutMs?: number;
   remaining(): number;
   assert(): void;
   read<T>(work: PromiseLike<T>): Promise<T>;
@@ -45,7 +46,10 @@ export function waitForAISignal<T>(
     );
   });
 }
-export function createAIRequestBudget(milliseconds = 27000): AIRequestBudget {
+export function createAIRequestBudget(
+  milliseconds = 27000,
+  modelTimeoutMs = 25000,
+): AIRequestBudget {
   const deadline = Date.now() + milliseconds;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), milliseconds);
@@ -55,6 +59,7 @@ export function createAIRequestBudget(milliseconds = 27000): AIRequestBudget {
   };
   return {
     signal: controller.signal,
+    modelTimeoutMs,
     remaining: () => Math.max(0, deadline - Date.now()),
     assert,
     read: async (work) => {
