@@ -6,6 +6,12 @@ export class AIExecutionError extends Error {
   constructor(
     public kind: AIFailure,
     public reason?: "MODEL_OUTPUT_LIMIT" | "EMPTY_TEXT" | "INVALID_JSON",
+    public usage?: {
+      outputTokens?: number;
+      thinkingTokens?: number;
+      tokenLimit?: number;
+      modelVersion?: string;
+    },
   ) {
     super(kind);
   }
@@ -336,6 +342,24 @@ export function aiFailureResponse(
     providerStatus: providerStatus ?? "OTHER",
     failureReason,
     ...providerDiagnostics(error),
+    ...(error instanceof AIExecutionError && error.usage
+      ? {
+          ...Object.fromEntries(
+            Object.entries(error.usage).filter(([key, value]) =>
+              key === "modelVersion"
+                ? typeof value === "string" &&
+                  /^gemini-[a-z0-9.-]{1,100}$/i.test(value)
+                : ["outputTokens", "thinkingTokens", "tokenLimit"].includes(
+                    key,
+                  ) &&
+                  typeof value === "number" &&
+                  Number.isInteger(value) &&
+                  value >= 0 &&
+                  value < 100_000_000,
+            ),
+          ),
+        }
+      : {}),
     reference,
   });
   return json(

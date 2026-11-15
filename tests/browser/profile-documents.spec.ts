@@ -178,6 +178,43 @@ async function openProfile(
     .fill(text);
 }
 
+test("profile review maps a source entity type to a single standard option", async ({
+  page,
+}) => {
+  await prepareDocuments(page);
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    return route.fulfill({
+      json:
+        body.profileStage === "correct"
+          ? {
+              ...finalResult,
+              profile: {
+                ...finalResult.profile,
+                type: "Incorporated Association",
+              },
+            }
+          : stageResult(body),
+    });
+  });
+  await openProfile(page);
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  const select = page.getByRole("combobox", {
+    name: "Organisation type",
+    exact: true,
+  });
+  await expect(select).toHaveValue("Incorporated association");
+  await expect(select.locator("option")).toHaveCount(8);
+  await expect(
+    select.getByRole("option", {
+      name: "Incorporated association",
+      exact: true,
+    }),
+  ).toHaveCount(1);
+});
+
 test("profile review runs three distinct stages with unchanged original evidence and no intermediate approval", async ({
   page,
 }) => {

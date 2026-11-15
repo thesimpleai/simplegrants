@@ -486,6 +486,37 @@ describe("signed, separate application preparation", () => {
   });
 });
 describe("bounded structured model reliability", () => {
+  it("logs only safe usage counters and resolved model version when output is exhausted", async () => {
+    mocks.generateContent.mockResolvedValueOnce({
+      text: "PRIVATE-OUTPUT",
+      candidates: [{ finishReason: "MAX_TOKENS" }],
+      modelVersion: "gemini-3-flash-preview",
+      usageMetadata: {
+        candidatesTokenCount: 100,
+        thoughtsTokenCount: 3000,
+        promptTokenCount: 999,
+      },
+    });
+    const response = await call({
+      action: "profile",
+      profileStage: "extract",
+      text: "Original source",
+      documentIds: [],
+    });
+    expect(response.status).toBe(502);
+    expect(console.error).toHaveBeenCalledWith(
+      "Simple Grants AI step unavailable",
+      expect.objectContaining({
+        outputTokens: 100,
+        thinkingTokens: 3000,
+        tokenLimit: 4096,
+        modelVersion: "gemini-3-flash-preview",
+      }),
+    );
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      "PRIVATE-OUTPUT",
+    );
+  });
   it("applies the configured concrete model's thinking controls to extraction and grounded search", async () => {
     vi.stubEnv("GEMINI_MODEL", "gemini-2.5-flash");
     model({ profile: { name: "Community Club" } });

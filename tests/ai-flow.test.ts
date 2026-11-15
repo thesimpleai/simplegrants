@@ -133,9 +133,7 @@ const requirement = (extra: Record<string, unknown> = {}) => ({
   category: "insurance",
   label: "public liability insurance",
   source_quote: "Applicants must supply current public liability insurance.",
-  mandatory: true,
-  conditional: false,
-  condition_applies: true,
+  rule: "required",
   ...extra,
 });
 beforeEach(() => {
@@ -214,6 +212,45 @@ describe("AI handler authentication and required input flow", () => {
 });
 
 describe("original-guideline evidence preflight", () => {
+  it("sends the same selected spreadsheet evidence to preflight and draft generation", async () => {
+    const parts = [
+      {
+        text: "EXCEL TEXT EXTRACT (unverified). SHEET: Budget\nB2: 1250.50\nB3: [Formula result unavailable]\nC3: [Saved spreadsheet error: #DIV/0!]",
+      },
+    ];
+    mocks.documentParts.mockResolvedValue({ parts, documents: [] });
+    mocks.generateJSON.mockResolvedValueOnce({
+      documents: [],
+      information: [],
+    });
+    mocks.generateJSON.mockResolvedValueOnce({
+      sections: [
+        {
+          question: "Describe the budget",
+          answer:
+            "Budget B2 records $1,250.50; remaining formula results require review.",
+        },
+      ],
+      missing_information: ["Budget B3 and C3 require correction"],
+    });
+    const first = await call({ documentIds: [grantId] });
+    expect(first.status).toBe(200);
+    const state = await first.json();
+    const response = await call({
+      ...state,
+      draftStage: "generate",
+      documentIds: [grantId],
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.generateJSON.mock.calls[0][1]).toEqual(parts);
+    expect(mocks.generateJSON.mock.calls[1][1]).toEqual(parts);
+    expect(mocks.generateJSON.mock.calls[0][0]).toContain(
+      "not numbers to invent or recalculate",
+    );
+    expect(mocks.generateJSON.mock.calls[1][0]).toContain(
+      "sheet and cell address",
+    );
+  });
   it.each([null, "2000-01-01", "2099-02-30"])(
     "blocks insurance with missing, expired or invalid expiry (%s) before model access",
     async (expires_on) => {
@@ -248,9 +285,7 @@ describe("original-guideline evidence preflight", () => {
           label: "a project budget",
           source_quote: "A project budget is mandatory.",
           field: "budget",
-          mandatory: true,
-          conditional: false,
-          condition_applies: true,
+          rule: "required",
           critical: true,
           missing: true,
         },
@@ -277,7 +312,7 @@ describe("original-guideline evidence preflight", () => {
           category: "audit_report",
           label: "financial audit",
           source_quote: "Financial audits are optional for this round.",
-          mandatory: false,
+          rule: "optional",
         }),
       ],
       information: [],

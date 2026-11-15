@@ -106,8 +106,18 @@ describe("real Gemini SDK HTTP failure handling", () => {
     ).toEqual({ type: "STRING", nullable: true });
     expect(
       payloads[1].generationConfig.responseSchema.properties.documents.items
-        .properties.condition_applies,
-    ).toEqual({ type: "BOOLEAN", nullable: true });
+        .properties.rule,
+    ).toEqual({
+      type: "STRING",
+      enum: [
+        "required",
+        "conditional_applies",
+        "conditional_unknown",
+        "not_applicable",
+        "optional",
+      ],
+    });
+    expect(payloads[1].generationConfig.maxOutputTokens).toBe(6144);
   });
   it("records the rejected schema field without logging quoted source values", async () => {
     fetchMock.mockResolvedValueOnce(

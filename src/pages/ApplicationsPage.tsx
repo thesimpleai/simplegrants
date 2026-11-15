@@ -22,6 +22,10 @@ import {
 } from "../components/ui";
 import type { Application } from "../types";
 import { draftEvidenceBlockers } from "../lib/grant-requirements";
+import {
+  MAX_AI_DOCUMENTS,
+  MAX_AI_DOCUMENT_BYTES,
+} from "../lib/document-formats";
 export default function ApplicationsPage({
   onDiscover,
 }: {
@@ -40,6 +44,7 @@ export default function ApplicationsPage({
     [reference, setReference] = useState(""),
     [submittedConfirmed, setSubmittedConfirmed] = useState(false),
     [referenceUnavailable, setReferenceUnavailable] = useState(false),
+    [sourceDocuments, setSourceDocuments] = useState<string[]>([]),
     [award, setAward] = useState({
       amount: "",
       startDate: new Date().toISOString().slice(0, 10),
@@ -69,6 +74,17 @@ export default function ApplicationsPage({
     setDraft(formatDraft(a.draft));
     setStatus(a.status);
     setReference(a.grant_reference ?? "");
+    setSourceDocuments(
+      Array.isArray(a.project_details.source_document_ids)
+        ? a.project_details.source_document_ids.filter(
+            (id): id is string =>
+              typeof id === "string" &&
+              app.data.documents.some(
+                (doc) => doc.id === id && doc.org_id === app.org?.id,
+              ),
+          )
+        : [],
+    );
     const confirmation = a.project_details.submission_confirmation;
     setSubmittedConfirmed(
       Boolean(
@@ -104,6 +120,7 @@ export default function ApplicationsPage({
       project_details: {
         ...application.project_details,
         ...details,
+        source_document_ids: sourceDocuments,
         ...(status === "submitted"
           ? {
               submission_confirmation: {
@@ -147,6 +164,7 @@ export default function ApplicationsPage({
           action: "draft",
           applicationId: application.id,
           opportunityId: application.opportunity_id,
+          documentIds: sourceDocuments,
         });
         if (result.draft) setDraft(formatDraft(result.draft));
         app.notify(
@@ -189,12 +207,19 @@ export default function ApplicationsPage({
     guidelines,
     app.data.documents,
   );
+  const sourceBytes = app.data.documents
+    .filter((doc) => sourceDocuments.includes(doc.id))
+    .reduce((sum, doc) => sum + doc.size_bytes, 0);
+  const sourcesTooLarge =
+    sourceDocuments.length > MAX_AI_DOCUMENTS ||
+    sourceBytes > MAX_AI_DOCUMENT_BYTES;
   const ready = Boolean(
     app.org?.verification_status === "approved" &&
     guidelines.trim() &&
     details.summary.trim() &&
     details.application_questions.trim() &&
-    evidenceBlockers.length === 0,
+    evidenceBlockers.length === 0 &&
+    !sourcesTooLarge,
   );
   return (
     <>
@@ -367,6 +392,42 @@ export default function ApplicationsPage({
                 placeholder="Project costs, GST treatment, requested amount and any other funding…"
               />
             </label>
+            {app.data.documents.length > 0 && (
+              <fieldset className="stack" disabled={busy}>
+                <legend>Supporting documents for this draft</legend>
+                <p className="small muted">
+                  Choose the files the assistant should read, such as a project
+                  budget spreadsheet. Saved spreadsheet values are not
+                  recalculated or audited.
+                </p>
+                {app.data.documents.map((document) => (
+                  <label className="checkbox-row" key={document.id}>
+                    <input
+                      type="checkbox"
+                      checked={sourceDocuments.includes(document.id)}
+                      onChange={(event) =>
+                        setSourceDocuments((ids) =>
+                          event.target.checked
+                            ? [...ids, document.id]
+                            : ids.filter((id) => id !== document.id),
+                        )
+                      }
+                    />
+                    Use {document.name} for this draft
+                  </label>
+                ))}
+                <p className="small muted">
+                  {sourceDocuments.length} of {MAX_AI_DOCUMENTS} documents ·{" "}
+                  {(sourceBytes / (1024 * 1024)).toFixed(1)} of 15 MB
+                </p>
+                {sourcesTooLarge && (
+                  <Notice>
+                    Choose up to 8 documents totalling no more than 15 MB before
+                    preparing the draft.
+                  </Notice>
+                )}
+              </fieldset>
+            )}
             {!ready && (
               <Notice>
                 Before drafting, approve your organisation profile and add the

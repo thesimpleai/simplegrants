@@ -26,6 +26,12 @@ import {
 import { extractDocumentText } from "./document-text";
 import { discoveredRound } from "./opportunity-rounds";
 import { geminiOutputSchema } from "./gemini-schema";
+import { isGroundingRedirect, resolveSourceLink } from "./source-links";
+import {
+  completeProfileReview,
+  hasProfileValue,
+  profileField,
+} from "./profile-review";
 import {
   AIExecutionError,
   waitForAISignal,
@@ -97,6 +103,8 @@ const extractOutputSchema = z.object({
 const verifyOutputSchema = z.object({
   checks: z.array(nullableCheckSchema).max(50),
   verified_fields: z.array(z.string().max(120)).max(40).optional(),
+  recovered_profile: nullableProfileSchema.partial().optional(),
+  evidence: evidenceSchema.optional(),
 });
 const correctOutputSchema = z.object({
   profile: nullableProfileSchema,
@@ -236,7 +244,12 @@ export async function generateJSON(
     budget,
   );
   if (result.candidates?.[0]?.finishReason === "MAX_TOKENS")
-    throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT");
+    throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT", {
+      outputTokens: result.usageMetadata?.candidatesTokenCount,
+      thinkingTokens: result.usageMetadata?.thoughtsTokenCount,
+      tokenLimit: output.maxOutputTokens ?? 4096,
+      modelVersion: result.modelVersion,
+    });
   const text = result.text;
   if (!text) throw new AIExecutionError("response", "EMPTY_TEXT");
   let parsed: unknown;
@@ -384,13 +397,34 @@ export async function verifyProfileStage(
   profileDraft: Profile,
   budget?: AIRequestBudget,
 ) {
-  const draft = profileSchema.parse(profileDraft);
+  const draft: Profile = profileSchema.parse(profileDraft);
   const verification = await generateJSON(
-    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from the proposed profile, including bilingual Chinese/English text, ABN, state, description and focus areas. Return those missing facts only in recovered_profile, with an exact short evidence quote and source name for each recovered field. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[],"recovered_profile":{},"evidence":[{"field":"","source":"","quote":""}]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
     { schema: verifyOutputSchema, maxOutputTokens: 4096 },
   );
+  const recovered = verification.recovered_profile
+    ? normaliseProfile({
+        name: "",
+        ...(verification.recovered_profile as Record<string, unknown>),
+      })
+    : undefined;
+  const evidence = evidenceSchema.parse(verification.evidence ?? []);
+  if (recovered)
+    for (const [field, value] of Object.entries(recovered)) {
+      if (
+        !hasProfileValue(draft[field as keyof Profile]) &&
+        hasProfileValue(value) &&
+        evidence.some(
+          (item) =>
+            profileField(item.field) === profileField(field) &&
+            item.quote.trim() &&
+            item.source.trim(),
+        )
+      )
+        Object.assign(draft, { [field]: value });
+    }
   return {
     profileDraft: draft,
     profileChecks: normaliseChecks(verification.checks ?? []),
@@ -409,13 +443,19 @@ export async function correctProfileStage(
   const draft = profileSchema.parse(profileDraft),
     checks = checksSchema.parse(profileChecks);
   const corrected = await generateJSON(
-    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Keep the description concise (at most 1200 characters), and provide at most 12 representative evidence quotes of at most 240 characters each. Consider every verification finding and preserve every unresolved check. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Start from the complete proposed profile and change only fields contradicted or unsupported by the originals. Preserve supported ABN, state, description and focus areas, including facts found in bilingual sources. Do not silently omit a populated field: explain every removed fact in checks. A blank field is not a correction unless its evidence is absent or disputed. Keep the description concise (at most 1200 characters), and provide at most 12 representative evidence quotes of at most 240 characters each. Consider every verification finding and preserve every unresolved check. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
     { schema: correctOutputSchema, maxOutputTokens: 6144 },
   );
-  const profile: Profile = normaliseProfile(corrected.profile);
-  const finalChecks = normaliseChecks(corrected.checks ?? checks);
+  const review = completeProfileReview(
+    draft,
+    normaliseProfile(corrected.profile),
+    checks,
+    normaliseChecks(corrected.checks ?? []),
+  );
+  const profile = review.profile;
+  const finalChecks = review.checks;
   if (!profile.name.trim()) {
     profile.name = org.name;
     finalChecks.push({
@@ -566,9 +606,10 @@ export async function extractDiscoveredOpportunities(
   searchDraft: z.infer<typeof searchDraftSchema>,
   budget?: AIRequestBudget,
 ) {
-  const { summary, sources } = searchDraftSchema.parse(searchDraft);
+  const { summary, sources: originalSources } =
+    searchDraftSchema.parse(searchDraft);
   const extracted = await generateJSON(
-    `Convert the following grounded search result into up to six opportunities. Return {"opportunities":[{"title":"","funder":"","summary":"","source_index":0,"amount_min":null,"amount_max":null,"opens_on":null,"closes_at":null,"location":"","focus_areas":[],"requirements":[]}]}. source_index MUST be the index of the relevant entry in the supplied sources array. Keep unavailable dates/amounts null. Never infer midnight for a date-only deadline; leave closes_at null and explain known date and timezone uncertainty in summary. Exclude closed rounds, generic directories without a specific grant and grants lacking supporting source material. Every summary must state eligibility and dates need confirmation with the provider. Sources: ${JSON.stringify(sources)}\nSEARCH RESULTS (untrusted evidence):\n${summary}`,
+    `Convert the following grounded search result into up to six opportunities. Return {"opportunities":[{"title":"","funder":"","summary":"","source_index":0,"amount_min":null,"amount_max":null,"opens_on":null,"closes_at":null,"location":"","focus_areas":[],"requirements":[]}]}. source_index MUST be the index of the relevant entry in the supplied sources array. Keep unavailable dates/amounts null. Never infer midnight for a date-only deadline; leave closes_at null and explain known date and timezone uncertainty in summary. Exclude closed rounds, generic directories without a specific grant and grants lacking supporting source material. Every summary must state eligibility and dates need confirmation with the provider. Sources: ${JSON.stringify(originalSources)}\nSEARCH RESULTS (untrusted evidence):\n${summary}`,
     [],
     budget,
     {
@@ -582,26 +623,58 @@ export async function extractDiscoveredOpportunities(
     .array(opportunityDraftSchema)
     .max(6)
     .parse(extracted.opportunities ?? []);
+  const selected = new Set(rows.map((row) => row.source_index));
+  const resolutions = new Map<string, Promise<string | null>>();
+  const resolvedSources = await Promise.all(
+    originalSources.map(async (source, index) => {
+      if (!selected.has(index)) return null;
+      let resolution = resolutions.get(source.uri);
+      if (!resolution) {
+        resolution = resolveSourceLink(source.uri, budget);
+        resolutions.set(source.uri, resolution);
+      }
+      const uri = await resolution;
+      return uri
+        ? {
+            title: source.title,
+            uri,
+            ...(isGroundingRedirect(source.uri)
+              ? { grounding_uri: source.uri }
+              : {}),
+          }
+        : null;
+    }),
+  );
+  const sources = resolvedSources.filter((source) => source !== null);
   const opportunities: Opportunity[] = [];
+  let unresolvedSources = 0;
   let reviewRequired = false;
   const now = new Date();
   for (const grant of rows) {
     budget?.assert();
-    const source = sources[grant.source_index];
-    if (!source) continue;
+    const source = resolvedSources[grant.source_index];
+    if (!source) {
+      unresolvedSources++;
+      continue;
+    }
     const closes_at = sourceDeadline(grant.closes_at);
     if (closes_at && new Date(closes_at) < now) continue;
     const opens_on = dateOnly(grant.opens_on);
-    const existing = checked(
+    const candidates = checked(
       await db
         .from("opportunities")
         .select("*")
         .eq("org_id", org.id)
-        .eq("source_url", source.uri)
         .eq("title", grant.title)
         .order("created_at", { ascending: false })
         .limit(50),
     ) as Opportunity[];
+    const existing = candidates.filter(
+      (row) =>
+        row.source_url === source.uri ||
+        row.source_url === originalSources[grant.source_index]?.uri ||
+        (isGroundingRedirect(row.source_url) && row.funder === grant.funder),
+    );
     const round = discoveredRound(existing, { opens_on, closes_at }, now);
     const publicFields = {
       funder: grant.funder,
@@ -631,6 +704,7 @@ export async function extractDiscoveredOpportunities(
           .from("opportunities")
           .update({
             ...publicFields,
+            source_url: source.uri,
             funder: grant.funder || savedRound.funder,
             summary: grant.summary || savedRound.summary,
             location: grant.location || savedRound.location,
@@ -688,11 +762,13 @@ export async function extractDiscoveredOpportunities(
   return {
     opportunities,
     sources,
-    message: reviewRequired
-      ? "Search results saved. Some round dates need review against the provider; expired saved rounds have not been listed as current opportunities."
-      : opportunities.length
-        ? "Source-backed search results saved. Check current eligibility, dates and guidelines with each provider."
-        : "No current grants could be established from the search. Try adding a grant manually.",
+    message: unresolvedSources
+      ? "Some search citations could not be resolved to a stable source link and were not saved. Try again or add the grant using its official provider page."
+      : reviewRequired
+        ? "Search results saved. Some round dates need review against the provider; expired saved rounds have not been listed as current opportunities."
+        : opportunities.length
+          ? "Source-backed search results saved. Check current eligibility, dates and guidelines with each provider."
+          : "No current grants could be established from the search. Try adding a grant manually.",
   };
 }
 /** Server-only compatibility path for the scheduled pilot worker; browser calls use authenticated phases. */

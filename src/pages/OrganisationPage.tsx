@@ -17,6 +17,7 @@ import {
   CalendarDays,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
 import {
   Badge,
   Busy,
@@ -175,7 +176,7 @@ export default function OrganisationPage() {
         .map((document) => document.id),
     );
     setProfileStage(null);
-    setProfile(org?.profile ?? { name: org?.name ?? "" });
+    setProfile(profileValues(org?.profile ?? { name: org?.name ?? "" }));
     setFocusText((org?.focus_areas ?? []).join(", "));
     setChecksConfirmed(false);
     setApproveConfirmed(false);
@@ -292,7 +293,7 @@ export default function OrganisationPage() {
       if (!draft.profile)
         throw new Error("A profile draft was not returned. Please try again.");
       setResult(draft);
-      setProfile(draft.profile);
+      setProfile(profileValues(draft.profile));
       setFocusText((draft.profile.focus_areas ?? []).join(", "));
       setChecksConfirmed(false);
       setApproveConfirmed(false);
@@ -1057,29 +1058,9 @@ export default function OrganisationPage() {
                     }
                   >
                     <option value="">Choose a type</option>
-                    {[
-                      "Charity",
-                      "Not-for-profit",
-                      "Community organisation",
-                      "Incorporated association",
-                      "Company limited by guarantee",
-                      "Social enterprise",
-                      "Other",
-                    ].map((type) => (
+                    {ORGANISATION_TYPES.map((type) => (
                       <option key={type}>{type}</option>
                     ))}
-                    {profile.type &&
-                      ![
-                        "Charity",
-                        "Not-for-profit",
-                        "Community organisation",
-                        "Incorporated association",
-                        "Company limited by guarantee",
-                        "Social enterprise",
-                        "Other",
-                      ].includes(profile.type) && (
-                        <option>{profile.type}</option>
-                      )}
                   </select>
                 </label>
                 <label className="form-field">

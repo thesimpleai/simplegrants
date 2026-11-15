@@ -481,6 +481,68 @@ test("discovery uses two immutable requests and loads records only after extract
   ).toBeEnabled();
 });
 
+test("selected budget evidence is saved and sent unchanged through both draft stages", async ({
+  page,
+}) => {
+  const id = "6624fb62-1f03-4873-8ae0-b46b8a0a5dd2";
+  const state = await mockGrantWorkspace(page, {
+    documents: [
+      {
+        id,
+        org_id: orgId,
+        name: "Budget.xlsx",
+        category: "financial_statement",
+        storage_path: `${orgId}/Budget.xlsx`,
+        mime_type:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes: 500,
+        verified: false,
+        created_at: "2026-11-01T00:00:00Z",
+      },
+    ],
+  });
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.draftStage === "preflight")
+      return route.fulfill({
+        json: {
+          draftRequirements: { documents: [], information: [] },
+          sourceFingerprint: fingerprint,
+          stageIssuedAt: Date.now(),
+        },
+      });
+    state.application.draft = {
+      application_text:
+        "Budget B2 is an unverified saved value; unavailable formula cells need review.",
+    };
+    return route.fulfill({ json: { draft: state.application.draft } });
+  });
+  await openApplication(page);
+  const check = page.getByRole("checkbox", {
+    name: "Use Budget.xlsx for this draft",
+    exact: true,
+  });
+  await expect(check).not.toBeChecked();
+  await check.check();
+  await page
+    .getByRole("button", { name: "Prepare draft with AI", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Your application draft", exact: true }),
+  ).toHaveValue(/Budget B2/);
+  expect(state.ai).toHaveLength(2);
+  expect(state.ai.map((body) => body.documentIds)).toEqual([[id], [id]]);
+  expect(state.application.project_details.source_document_ids).toEqual([id]);
+  await openApplication(page);
+  await expect(
+    page.getByRole("checkbox", {
+      name: "Use Budget.xlsx for this draft",
+      exact: true,
+    }),
+  ).toBeChecked();
+});
+
 test("failed draft generation preserves the manual draft and inputs, then retry restarts preflight", async ({
   page,
 }) => {

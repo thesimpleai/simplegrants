@@ -160,9 +160,85 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("source-backed discovery round preservation", () => {
+  it("saves a canonical provider URL while retaining the grounding citation and repairing a matching old redirect record", async () => {
+    const redirect =
+      "https://vertexaisearch.cloud.google.com/grounding-api-redirect/new-token";
+    const old =
+      "https://vertexaisearch.cloud.google.com/grounding-api-redirect/old-token";
+    const existing = saved({
+      source_url: old,
+      funder: "Current Provider",
+      opens_on: "2027-01-01",
+      closes_at: "2027-01-31T06:00:00.000Z",
+    });
+    rows = [existing];
+    const fetch = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { location: sourceUrl } }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    mocks.generateContent.mockResolvedValueOnce({
+      text: "Current source-backed program",
+      candidates: [
+        {
+          groundingMetadata: {
+            groundingChunks: [
+              { web: { title: "Official program", uri: redirect } },
+            ],
+          },
+        },
+      ],
+    });
+    mocks.generateContent.mockResolvedValueOnce({
+      text: JSON.stringify({ opportunities: [fresh()] }),
+    });
+    const result = await discoverOpportunities(db(), org);
+    expect(inserts).toHaveLength(0);
+    expect(result.opportunities[0]).toMatchObject({
+      id: existing.id,
+      source_url: sourceUrl,
+      guidelines_text: existing.guidelines_text,
+      status: existing.status,
+    });
+    expect(result.opportunities[0].provenance.sources).toEqual([
+      { title: "Official program", uri: sourceUrl, grounding_uri: redirect },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("does not save an opportunity whose temporary citation cannot be resolved", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 404 })),
+    );
+    mocks.generateContent.mockResolvedValueOnce({
+      text: "Program found",
+      candidates: [
+        {
+          groundingMetadata: {
+            groundingChunks: [
+              {
+                web: {
+                  title: "Program",
+                  uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/expired",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    mocks.generateContent.mockResolvedValueOnce({
+      text: JSON.stringify({ opportunities: [fresh()] }),
+    });
+    const result = await discoverOpportunities(db(), org);
+    expect(inserts).toHaveLength(0);
+    expect(result.opportunities).toEqual([]);
+    expect(result.message).toContain("not saved");
+  });
   it("creates a new 2027 round instead of rewriting a closed 2026 round, then repeats idempotently", async () => {
     const historical = saved();
     rows = [structuredClone(historical)];

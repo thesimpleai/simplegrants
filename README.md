@@ -65,7 +65,7 @@ Official Australian source pages were blocked by the development environment’s
 
 ## Validation
 
-See the [13 November QA readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
+See the [16 November QA readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
 
 ```sh
 npm test                 # backend evidence/security and draft rendering
