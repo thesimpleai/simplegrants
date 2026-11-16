@@ -35,7 +35,7 @@ Row-level security separates organisations within Simple Grant. One login can ow
 ## 2. Connect Netlify to GitHub
 
 1. In Netlify, connect `thesimpleai/simplegrants` and use `main` as the production branch.
-2. Use the repository's `netlify.toml`: Node 22, build command `npm run build`, publish directory `dist`, and functions directory `netlify/functions`.
+2. Use the repository's `netlify.toml`: Node 22, build command `npm test && npm run build`, publish directory `dist`, and functions directory `netlify/functions`.
 3. Add the environment variables below. Public Vite values must be available during the build. All other API keys must be available to Functions, including scheduled functions. Give preview deploys separate non-production service credentials, or leave their live integrations disabled.
 4. Before production rollout, complete [Authentication](AUTHENTICATION.md): working HTTPS on `https://simplegrants.com.au`, the required migrations through 007, the four login settings and verified Resend login sender. Verify these prerequisites for the deployment environment and skip migrations that are already installed. Local tests do not establish provider configuration or real delivery. Default preview origins intentionally cannot exercise the production login route.
 5. Deploy the current `main` revision and wait for the Netlify production deployment to complete. A source push alone does not establish the live revision. Changing a `VITE_` variable requires rebuilding the frontend; redeploy after runtime secret changes. Request a fresh application-specific email and test sign-in and a protected grant deep link on the canonical domain. Old native Supabase links are not consumed after rollout. Leave the shared Supabase global Auth configuration unchanged.
@@ -70,6 +70,10 @@ No Gemini key, Resend key or Supabase service role key should have a `VITE_` pre
 Create the Gemini key in your Google AI Studio/Google Cloud project and the Resend key in Resend. Enter both into Netlify; the Resend key does not belong in Gemini settings.
 
 The Flash alias can change its underlying model. Before launch, verify that the selected model supports the document formats and Google Search grounding this application uses. Pin `GEMINI_MODEL` to a tested stable Flash model if you need predictable behaviour and cost. Configure quota and budget limits in the provider account. The database also limits portal and eligible public-email AI requests to a shared 60 per user per UTC day across organisations; this is a request count, not a token or dollar cap. Profile preparation uses three separately authenticated requests; discovery and application drafting each use two. Every successfully claimed phase consumes one of the daily requests, including a phase whose downstream work fails. Retry restarts that flow from its first phase with the preserved originals; those requests claim quota again. Scheduled discovery has separate consumption. This setup does not claim that a particular preview model is the latest supported production model.
+
+### Runtime regression checks
+
+The checked-in Netlify build command is `npm test && npm run build`, so the public-handler context regressions must pass before publishing. GitHub CI also runs `npm run test:ai:runtime` after installing Chromium: this builds the UI, packages and invokes the actual Netlify bootstrap, and exercises profile/draft/search through controlled HTTP services. See [AI core verification](AI_CORE_VERIFICATION.md) for the proven `691dac2` runtime crash and the separate live-provider test prerequisites.
 
 ### Long-running AI phases
 

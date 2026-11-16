@@ -40,7 +40,7 @@ Long AI phases run in Netlify Background Functions with a 90-second model deadli
 
 Profile preparation uses three authenticated AI requests; discovery and application drafting each use two. Every claimed phase counts toward the shared 60-request daily user budget. A failed flow restarts from its first phase, preserving saved source records; early phases do not save partial search results or application drafts.
 
-For Netlify: build `npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
+For Netlify: build `npm test && npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
 
 For an existing shared Supabase project:
 
@@ -67,12 +67,14 @@ Official Australian source pages were blocked by the development environment’s
 
 ## Validation
 
-See the [round 5 QA readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
+See the [AI runtime verification and readiness review](docs/QA_READINESS.md) for the latest fixes, local results and remaining live launch checks.
 
 ```sh
 npm test                 # backend evidence/security and draft rendering
 npm run build            # TypeScript plus production frontend
 npm run test:browser     # Chromium workflows; install Playwright Chromium if needed
+npm run test:ai:runtime  # built UI + packaged Netlify bootstrap; HTTP fixtures, including 31-second delay
+npm run test:ai:live     # same flow with real Gemini; requires secure key/network access
 npm run test:db          # disposable Docker/Postgres SQL and tenant-isolation tests
 ```
 

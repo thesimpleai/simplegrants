@@ -620,4 +620,6 @@ export async function executeAI(
     budget.close();
   }
 }
-export default executeAI;
+// Netlify supplies (Request, Context). Keep that context separate from the
+// execution helper's optional AIRequestBudget argument.
+export default (request: Request) => executeAI(request);
