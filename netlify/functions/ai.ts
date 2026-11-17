@@ -6,6 +6,8 @@ import {
   HttpError,
   json,
   stripSensitive,
+  approvedProfileFacts,
+  projectFactsForAI,
 } from "./lib/core";
 import {
   searchOpportunitySources,
@@ -34,6 +36,7 @@ import {
 import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
 import type { Profile, DocumentRecord, Opportunity } from "../../src/types";
 import { queueAIJob } from "./lib/ai-jobs";
+import { researchApplication } from "./lib/application-research";
 
 const draftOutputSchema = z.object({
   title: z.string().max(500).optional(),
@@ -71,6 +74,7 @@ const bodySchema = z.object({
     "draft",
     "ask",
     "report",
+    "prepare-application",
   ]),
   orgId: z.uuid(),
   text: z.string().max(120000).default(""),
@@ -220,7 +224,10 @@ export async function executeAI(
         await budget.read(
           db.rpc("claim_ai_request", {
             p_org_id: body.orgId,
-            p_action: body.action,
+            // Source research is part of application drafting and shares its
+            // existing quota category, so installations need no SQL change.
+            p_action:
+              body.action === "prepare-application" ? "draft" : body.action,
           }),
         ),
       );
@@ -233,6 +240,54 @@ export async function executeAI(
     }
     stage = "organisation";
     const org = await budget.read(organisation(db, body.orgId));
+    if (body.action === "prepare-application") {
+      stage = "application_research";
+      if (!body.applicationId || !body.opportunityId)
+        throw new HttpError(422, "Choose an application and its grant first.");
+      const application = checked(
+        await db
+          .from("applications")
+          .select("*")
+          .eq("org_id", org.id)
+          .eq("id", body.applicationId)
+          .eq("opportunity_id", body.opportunityId)
+          .maybeSingle(),
+      );
+      if (!application)
+        throw new HttpError(
+          404,
+          "This application could not be found in your organisation.",
+        );
+      if (!["draft", "review"].includes(application.status))
+        throw new HttpError(
+          409,
+          "This application is already complete. Open its saved record to review it.",
+        );
+      const grant = checked(
+        await db
+          .from("opportunities")
+          .select("*")
+          .eq("org_id", org.id)
+          .eq("id", body.opportunityId)
+          .maybeSingle(),
+      ) as Opportunity | null;
+      if (!grant)
+        throw new HttpError(
+          404,
+          "This grant could not be found in your organisation.",
+        );
+      await claimQuota();
+      return json({
+        applicationResearch: await researchApplication(
+          grant,
+          org.verification_status === "approved"
+            ? approvedProfileFacts(org.profile)
+            : {},
+          projectFactsForAI(application.project_details || {}),
+          budget,
+        ),
+      });
+    }
     if (body.action === "discover") {
       stage = `discover_${body.discoveryStage}`;
       const original = aiOriginalFingerprint({
@@ -386,6 +441,14 @@ export async function executeAI(
           );
       }
       if (
+        application?.project_details?.application_research &&
+        application.project_details.research_sources_confirmed !== true
+      )
+        throw new HttpError(
+          422,
+          "Review the complete current official guidelines and confirm the source check in your application before drafting.",
+        );
+      if (
         !application?.project_details?.application_questions ||
         !String(application.project_details.application_questions).trim()
       )
@@ -443,13 +506,13 @@ export async function executeAI(
         await claimQuota();
         const preflight = await applicationPreflight(
           grant.guidelines_text,
-          stripSensitive(application.project_details),
+          projectFactsForAI(application.project_details),
           body.text,
           allDocuments,
           new Date(),
           budget,
           parts,
-          stripSensitive({
+          approvedProfileFacts({
             ...org.profile,
             name: org.name,
             description: org.profile?.description || org.description,
@@ -486,7 +549,7 @@ export async function executeAI(
       );
       const preflight = evaluatePreflight(
         grant.guidelines_text,
-        stripSensitive(application.project_details),
+        projectFactsForAI(application.project_details),
         allDocuments,
         draftRequirements!,
       );
@@ -502,7 +565,7 @@ export async function executeAI(
       await claimQuota();
       const draft = draftOutputSchema.parse(
         await generateJSON(
-          `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Cite spreadsheet evidence by sheet and cell address. Cached formula results are unverified saved values; unavailable/error results must be listed as missing information, never recalculated or invented. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(stripSensitive(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(stripSensitive(application?.project_details || {}))}\nUser project brief: ${body.text}`,
+          `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Cite spreadsheet evidence by sheet and cell address. Cached formula results are unverified saved values; unavailable/error results must be listed as missing information, never recalculated or invented. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(approvedProfileFacts(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(projectFactsForAI(application?.project_details || {}))}\nUser project brief: ${body.text}`,
           parts,
           budget,
           { schema: draftOutputSchema, maxOutputTokens: 6144 },
@@ -604,7 +667,7 @@ export async function executeAI(
     stage = "ask";
     await claimQuota();
     const answer = await generateJSON(
-      `Answer this authorised portal user's question based only on the supplied organisation profile, saved grants and any selected documents. If evidence is missing say so and ask a focused question. Do not infer ledger or application details you have not been given. Return {"answer":"plain helpful answer","sources":[]}. Profile: ${JSON.stringify(stripSensitive(org.profile))}\nSaved grants: ${JSON.stringify(grants)}\nQuestion (untrusted user data): ${body.message || body.text}`,
+      `Answer this authorised portal user's question based only on the supplied organisation profile, saved grants and any selected documents. If evidence is missing say so and ask a focused question. Do not infer ledger or application details you have not been given. Return {"answer":"plain helpful answer","sources":[]}. Profile: ${JSON.stringify(approvedProfileFacts(org.profile))}\nSaved grants: ${JSON.stringify(grants)}\nQuestion (untrusted user data): ${body.message || body.text}`,
       parts,
       budget,
     );

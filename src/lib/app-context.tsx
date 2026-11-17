@@ -34,6 +34,7 @@ import { signOutFromSimpleGrant } from "./auth-session";
 import { safeAuthReturnPath } from "./auth-links";
 import { validExpiryDate } from "./grant-requirements";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
+import { isApplicationResearch } from "./application-research";
 function organisationPreferenceKey(userId: string) {
   let project = configured ? "connected-project" : "demo";
   try {
@@ -414,16 +415,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
   async function updateOrg(patch: Partial<Organisation>) {
     if (!org) throw new Error("Choose an organisation first.");
+    const targetOrg = org.id;
+    const targetUser = currentUserId.current;
+    let saved = { ...org, ...patch };
     if (supabase) {
-      const { error } = await supabase
+      const { data: updated, error } = await supabase
         .from("organizations")
         .update(patch)
-        .eq("id", org.id);
+        .eq("id", targetOrg)
+        .select("*")
+        .maybeSingle();
       if (error) throw error;
+      if (!updated || updated.id !== targetOrg)
+        throw new Error(
+          "Your organisation details could not be saved. Your entries are still here. Check your permission or connection, then try saving again.",
+        );
+      saved = updated;
     }
-    setOrganisations((a) =>
-      a.map((o) => (o.id === org.id ? { ...o, ...patch } : o)),
-    );
+    if (currentUserId.current !== targetUser || activeOrg.current !== targetOrg)
+      throw new Error(
+        "Your organisation or sign-in changed while saving. Return to the original organisation to check its saved details.",
+      );
+    setOrganisations((a) => a.map((o) => (o.id === targetOrg ? saved : o)));
     notify("Organisation details saved.");
   }
   async function uploadDocuments(
@@ -753,6 +766,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           "We couldn’t connect to your AI assistant. Check your connection and try again.",
         SG_AI_RESPONSE:
           "We couldn’t read a response from your AI assistant. Please try again.",
+        SG_AI_BLOCKED:
+          "The AI provider could not process this source. Review the selected document or enter its supported facts manually. Child safeguarding and abuse prevention information can be included in your organisation profile.",
       };
       const safeCode = Object.hasOwn(messages, code) ? code : "SG_AI_RESPONSE";
       const safeReference =
@@ -902,7 +917,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
       )
         throw failure();
       ensureCurrent();
-      return corrected as AIResult;
+      const evidence = [
+        extracted.evidence,
+        verified.evidence,
+        corrected.evidence,
+      ]
+        .flatMap((items) => (Array.isArray(items) ? items : []))
+        .filter(
+          (item) =>
+            isRecord(item) &&
+            typeof item.field === "string" &&
+            item.field.length <= 120 &&
+            typeof item.source === "string" &&
+            item.source.length <= 500 &&
+            typeof item.quote === "string" &&
+            item.quote.length <= 2000,
+        );
+      return {
+        ...corrected,
+        evidence: [
+          ...new Map(
+            evidence.map((item) => [JSON.stringify(item), item]),
+          ).values(),
+        ].slice(0, 150),
+      } as AIResult;
     }
     const isReceipt = (result: Record<string, unknown>) =>
       typeof result.sourceFingerprint === "string" &&
@@ -1009,9 +1047,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
           ? isRecord(result.draft)
           : original.action === "report"
             ? isRecord(result.report)
-            : original.action === "ask"
-              ? typeof result.answer === "string"
-              : false;
+            : original.action === "prepare-application"
+              ? isApplicationResearch(result.applicationResearch)
+              : original.action === "ask"
+                ? typeof result.answer === "string"
+                : false;
     if (!valid) throw failure();
     ensureCurrent();
     if (

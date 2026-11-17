@@ -18,6 +18,12 @@ import {
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
+import { validateProfileDates } from "../lib/profile-dates";
+import { mergeReviewedProfile } from "../lib/profile-merge";
+import {
+  ProfileDetailsForm,
+  ProfileDetailsSummary,
+} from "../components/ProfileDetails";
 import {
   Badge,
   Busy,
@@ -35,6 +41,7 @@ import type {
   ProfileStage,
   UploadBatchResult,
   DocumentRecord,
+  ReviewCheck,
 } from "../types";
 import {
   isInsuranceCategory,
@@ -101,6 +108,7 @@ export default function OrganisationPage() {
   const [step, setStep] = useState<"sources" | "review">("sources");
   const [history, setHistory] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [includeInsurance, setIncludeInsurance] = useState(false);
   const [result, setResult] = useState<AIResult | null>(null);
   const [profile, setProfile] = useState<Profile>({ name: "" });
   const [focusText, setFocusText] = useState("");
@@ -137,7 +145,13 @@ export default function OrganisationPage() {
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
   );
-  const selectedBytes = publicDocuments
+  const insuranceDocuments = app.data.documents.filter((document) =>
+    isInsuranceCategory(document.category),
+  );
+  const sourceDocuments = includeInsurance
+    ? [...publicDocuments, ...insuranceDocuments]
+    : publicDocuments;
+  const selectedBytes = app.data.documents
     .filter((document) => selected.includes(document.id))
     .reduce((total, document) => total + document.size_bytes, 0);
   const selectionTooLarge =
@@ -152,6 +166,22 @@ export default function OrganisationPage() {
   const completeness = Math.round(
     (requiredFacts.filter(Boolean).length / requiredFacts.length) * 100,
   );
+  const sourceEvidence =
+    result?.evidence ??
+    (Array.isArray(profile.source_evidence) ? profile.source_evidence : []);
+  const savedChecks = Array.isArray(profile.review_notes)
+    ? profile.review_notes.filter(
+        (note): note is ReviewCheck =>
+          !!note &&
+          typeof note === "object" &&
+          typeof note.field === "string" &&
+          typeof note.issue === "string",
+      )
+    : [];
+  const reviewChecks = validateProfileDates(
+    profile,
+    result?.checks ?? savedChecks,
+  );
 
   function openWizard() {
     setWizard(true);
@@ -159,6 +189,7 @@ export default function OrganisationPage() {
     setHistory("");
     setError("");
     setResult(null);
+    setIncludeInsurance(false);
     let selectedSize = 0;
     let selectedCount = 0;
     setSelected(
@@ -292,9 +323,58 @@ export default function OrganisationPage() {
       );
       if (!draft.profile)
         throw new Error("A profile draft was not returned. Please try again.");
-      setResult(draft);
-      setProfile(profileValues(draft.profile));
-      setFocusText((draft.profile.focus_areas ?? []).join(", "));
+      let nextProfile = draft.profile;
+      const preservedChecks: ReviewCheck[] = [];
+      if (org?.verification_status === "approved") {
+        const saved: Profile = {
+          ...org.profile,
+          name: org.name,
+          description: org.description,
+          abn: org.abn ?? "",
+          type: org.type,
+          state: org.state,
+          focus_areas: org.focus_areas,
+          website: org.website ?? "",
+        };
+        const merged = mergeReviewedProfile(saved, draft.profile);
+        nextProfile = merged.profile;
+        preservedChecks.push(...merged.checks);
+        if (Array.isArray(saved.review_notes)) {
+          preservedChecks.push(
+            ...saved.review_notes.filter(
+              (note): note is ReviewCheck =>
+                !!note &&
+                typeof note === "object" &&
+                typeof note.field === "string" &&
+                typeof note.issue === "string",
+            ),
+          );
+        }
+      }
+      setResult({
+        ...draft,
+        checks: [
+          ...new Map(
+            [...(draft.checks ?? []), ...preservedChecks].map((check) => [
+              JSON.stringify(check),
+              check,
+            ]),
+          ).values(),
+        ],
+        evidence: [
+          ...new Map(
+            [
+              ...(org?.verification_status === "approved" &&
+              Array.isArray(org.profile.source_evidence)
+                ? org.profile.source_evidence
+                : []),
+              ...(draft.evidence ?? []),
+            ].map((item) => [JSON.stringify(item), item]),
+          ).values(),
+        ],
+      });
+      setProfile(profileValues(nextProfile));
+      setFocusText((nextProfile.focus_areas ?? []).join(", "));
       setChecksConfirmed(false);
       setApproveConfirmed(false);
       setStep("review");
@@ -312,10 +392,7 @@ export default function OrganisationPage() {
       );
       return;
     }
-    if (
-      !approveConfirmed ||
-      ((result?.checks?.length ?? 0) > 0 && !checksConfirmed)
-    ) {
+    if (!approveConfirmed || (reviewChecks.length > 0 && !checksConfirmed)) {
       setError(
         "Please review and confirm the organisation details and any differences first.",
       );
@@ -326,6 +403,14 @@ export default function OrganisationPage() {
     try {
       const reviewedProfile = {
         ...profile,
+        beneficiaries: profile.beneficiaries
+          ?.map((value) => value.trim())
+          .filter(Boolean),
+        service_locations: profile.service_locations
+          ?.map((value) => value.trim())
+          .filter(Boolean),
+        ...(result?.evidence ? { source_evidence: result.evidence } : {}),
+        review_notes: reviewChecks,
         focus_areas: focusText
           .split(",")
           .map((value) => value.trim())
@@ -502,6 +587,7 @@ export default function OrganisationPage() {
                   )}
                 </div>
               </div>
+              <ProfileDetailsSummary profile={org.profile} />
               <div className="profile-completeness">
                 <div className="row-between">
                   <span>Core profile information</span>
@@ -869,19 +955,45 @@ export default function OrganisationPage() {
                   Use registration documents and public background information.
                   Financial statements stay in your document library.
                 </p>
+                {insuranceDocuments.length > 0 && (
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={includeInsurance}
+                      disabled={!!busy}
+                      onChange={(event) => {
+                        setIncludeInsurance(event.target.checked);
+                        if (!event.target.checked)
+                          setSelected((ids) =>
+                            ids.filter(
+                              (id) =>
+                                !insuranceDocuments.some(
+                                  (document) => document.id === id,
+                                ),
+                            ),
+                          );
+                      }}
+                    />
+                    <span>
+                      Show insurance documents for optional AI extraction. I
+                      authorise selected insurance documents to be sent to
+                      Gemini.
+                    </span>
+                  </label>
+                )}
                 <p className="small muted">
                   Choose up to 8 documents, totalling no more than 15 MB.
                   Uncheck a document to make room for another.
                 </p>
                 <p className="small">
                   <strong>
-                    {selected.length} of {publicDocuments.length} selected
+                    {selected.length} of {sourceDocuments.length} selected
                   </strong>{" "}
                   · {(selectedBytes / (1024 * 1024)).toFixed(1)} MB of 15 MB
                 </p>
-                {publicDocuments.length ? (
+                {sourceDocuments.length ? (
                   <div className="source-document-list">
-                    {publicDocuments.map((document) => (
+                    {sourceDocuments.map((document) => (
                       <label className="checkbox-row" key={document.id}>
                         <input
                           type="checkbox"
@@ -942,7 +1054,9 @@ export default function OrganisationPage() {
                 Before uploading a document for AI, redact bank account details,
                 personal identifiers and confidential financial information.
                 Financial statements and audit reports are kept in your document
-                library and are not selected for this profile step.
+                library and are not selected for this profile step. Insurance
+                documents are included only when you choose to show them and
+                select the individual files.
               </Notice>
               {busy === "profile" && profileStage && (
                 <div role="status" aria-live="polite">
@@ -995,10 +1109,10 @@ export default function OrganisationPage() {
                   </div>
                 </div>
               )}
-              {!!result?.checks?.length && (
+              {reviewChecks.length > 0 && (
                 <section className="review-differences">
                   <h3>These details need your attention</h3>
-                  {result.checks.map((check, index) => (
+                  {reviewChecks.map((check, index) => (
                     <div
                       className="review-check"
                       key={`${check.field}-${index}`}
@@ -1112,11 +1226,12 @@ export default function OrganisationPage() {
                   placeholder="https://"
                 />
               </label>
-              {!!result?.evidence?.length && (
+              <ProfileDetailsForm profile={profile} onChange={setProfile} />
+              {!!sourceEvidence.length && (
                 <details>
                   <summary>View source references</summary>
                   <ul className="evidence-list">
-                    {result.evidence.map((source, index) => (
+                    {sourceEvidence.map((source, index) => (
                       <li key={index}>{evidenceText(source)}</li>
                     ))}
                   </ul>
@@ -1148,7 +1263,7 @@ export default function OrganisationPage() {
                   disabled={
                     !!busy ||
                     !approveConfirmed ||
-                    (!!result?.checks?.length && !checksConfirmed)
+                    (reviewChecks.length > 0 && !checksConfirmed)
                   }
                   onClick={approveProfile}
                 >

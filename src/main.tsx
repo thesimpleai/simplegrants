@@ -8,6 +8,7 @@ import {
 } from "./lib/auth-links";
 import { AppProvider } from "./lib/app-context";
 import "./styles.css";
+import "./brand.css";
 // Capture a confirmation once before StrictMode effects, then remove its bearer
 // token from the visible URL. It stays only in this page's in-memory props.
 const isAuthConfirm =

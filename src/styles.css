@@ -3023,3 +3023,47 @@ td:last-child {
   white-space: nowrap;
   pointer-events: none;
 }
+
+.profile-optional-sections,
+.profile-record-list {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.profile-detail-section {
+  border-top: 1px solid var(--border, #e4e7eb);
+  padding: 16px 0;
+  min-width: 0;
+}
+.profile-detail-section > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 6px 0;
+}
+.profile-detail-section > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 4px;
+}
+.profile-detail-section[open] > summary {
+  margin-bottom: 16px;
+}
+.profile-record {
+  border: 1px solid var(--border, #e4e7eb);
+  border-radius: 12px;
+  padding: 16px;
+  min-width: 0;
+}
+.profile-record legend {
+  font-weight: 600;
+  padding: 0 6px;
+}
+.profile-record > .button {
+  margin-top: 16px;
+}
+.profile-wide-field {
+  grid-column: 1 / -1;
+}
+.profile-detail-section .profile-facts dd {
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
