@@ -672,6 +672,9 @@ try {
       })
       .fill(reviewedDescription);
     await page
+      .getByRole("checkbox", { name: /I checked these differences/ })
+      .check();
+    await page
       .getByRole("checkbox", { name: /I have checked these details/ })
       .check();
     await page.getByRole("button", { name: "Approve and save" }).click();
