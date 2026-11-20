@@ -57,6 +57,7 @@ const state = {
   workers: [],
   errors: [],
   providerFailure: 0,
+  profileOutputLimit: false,
   delayed: false,
   orgWrites: 0,
 };
@@ -168,6 +169,23 @@ const server = createServer(async (request, response) => {
         body,
         timeout: request.headers["x-server-timeout"],
       });
+      if (state.profileOutputLimit) {
+        assert.ok(body.generationConfig?.responseSchema?.properties?.profile);
+        return json(response, {
+          modelVersion: "gemini-3.8-flash",
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: '{"profile":{' }] },
+              finishReason: "MAX_TOKENS",
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 18000,
+            candidatesTokenCount: 11010,
+            thoughtsTokenCount: 1263,
+          },
+        });
+      }
       if (state.providerFailure)
         return json(
           response,
@@ -186,7 +204,7 @@ const server = createServer(async (request, response) => {
       if (
         !quick &&
         !state.delayed &&
-        body.generationConfig?.responseSchema?.properties?.verified_fields
+        body.generationConfig?.responseSchema?.properties?.recovered_profile
       ) {
         state.delayed = true;
         await sleep(31000);
@@ -467,6 +485,15 @@ try {
   ).toHaveValue("Runtime Community Association");
   assert.equal(state.orgWrites, 0);
   assert.equal(state.claims, 3);
+  for (const { body } of state.payloads.slice(0, 3)) {
+    assert.equal(body.generationConfig.maxOutputTokens, 16384);
+    const sources = JSON.stringify(body.contents);
+    for (const document of evidence.filter(
+      ({ record }) => record.category === "other",
+    ))
+      assert.ok(sources.includes(`SOURCE DOCUMENT: ${document.name}`));
+    assert.ok(!sources.includes("SOURCE DOCUMENT: Budget.xlsx"));
+  }
   console.log(
     `PASS: built browser profile extract → verify → correct (${((Date.now() - start) / 1000).toFixed(1)} seconds); original TXT/DOCX/PDF/XLSX, no automatic approval`,
   );
@@ -574,6 +601,91 @@ try {
     );
   }
   state.providerFailure = 0;
+  if (!live) {
+    const profileHistory = page.getByRole("textbox", {
+      name: "Paste your organisation’s history or information",
+    });
+    const prepareProfile = page.getByRole("button", {
+      name: "Prepare my profile",
+      exact: true,
+    });
+    const publicHistory = page.getByRole("checkbox", {
+      name: "PublicHistory.xlsx",
+      exact: true,
+    });
+    const beforeLimitedAttempt = {
+      claims: state.claims,
+      modelCalls: state.modelCalls,
+    };
+    state.profileOutputLimit = true;
+    await page.goto(`${site}/?view=organisation&org=${orgId}`);
+    await page
+      .getByRole("button", { name: "Update with AI", exact: true })
+      .click();
+    await profileHistory.fill(sourceText);
+    await prepareProfile.click();
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText(
+      /Reference: [0-9a-f-]{36} \(SG_AI_OUTPUT_LIMIT\)/,
+      { timeout: 30000 },
+    );
+    await expect(alert).toContainText("response length limit");
+    await expect(alert).toContainText("still saved in your library");
+    await expect(profileHistory).toHaveValue(sourceText);
+    await expect(publicHistory).toBeChecked();
+    await expect(prepareProfile).toBeEnabled();
+    assert.equal(state.claims, beforeLimitedAttempt.claims + 1);
+    assert.equal(state.modelCalls, beforeLimitedAttempt.modelCalls + 1);
+    assert.equal(state.orgWrites, 0);
+    for (const doc of evidence) {
+      assert.ok(tables.documents.some((row) => row.id === doc.id));
+      assert.deepEqual(
+        objects.get(`simple-grant-documents/${doc.record.storage_path}`).bytes,
+        Buffer.from(doc.bytes),
+      );
+    }
+
+    const retryAttempt = state.payloads.length;
+    state.profileOutputLimit = false;
+    await publicHistory.uncheck();
+    await prepareProfile.click();
+    await expect(page.getByRole("dialog")).toHaveAccessibleName(
+      "Review your organisation details",
+      { timeout: 30000 },
+    );
+    await expect(alert).toHaveCount(0);
+    assert.ok(
+      !JSON.stringify(state.payloads[retryAttempt].body.contents).includes(
+        "SOURCE DOCUMENT: PublicHistory.xlsx",
+      ),
+    );
+    assert.equal(state.orgWrites, 0);
+    console.log(
+      "PASS: Gemini MAX_TOKENS shows SG_AI_OUTPUT_LIMIT, preserves sources and allows a retry to human review",
+    );
+
+    const reviewedDescription = "Gardening workshops for families in Victoria.";
+    await page
+      .getByRole("textbox", {
+        name: "What your organisation does",
+        exact: true,
+      })
+      .fill(reviewedDescription);
+    await page
+      .getByRole("checkbox", { name: /I checked these differences/ })
+      .check();
+    await page
+      .getByRole("checkbox", { name: /I have checked these details/ })
+      .check();
+    await page.getByRole("button", { name: "Approve and save" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    assert.equal(state.orgWrites, 1);
+    assert.equal(state.orgs[0].profile.description, reviewedDescription);
+    assert.equal(state.orgs[0].profile.mission, org.profile.mission);
+    console.log(
+      "PASS: explicit profile approval saves reviewed details and preserves the pre-existing mission",
+    );
+  }
   const badId = "6589400b-9984-4d38-95d0-606f738b1430";
   tables.documents.push({
     ...evidence.find((doc) => doc.name === "Charter.docx").record,

@@ -10,7 +10,7 @@ vi.mock("@google/genai", () => ({
   GoogleGenAI: class {
     models = { generateContent: mocks.generateContent };
   },
-  ThinkingLevel: { MINIMAL: "MINIMAL" },
+  ThinkingLevel: { MINIMAL: "MINIMAL", LOW: "LOW" },
 }));
 import handler from "../netlify/functions/ai";
 const orgId = "6a03978d-6266-46b6-b35e-bf8069e50743",
@@ -515,12 +515,17 @@ describe("bounded structured model reliability", () => {
       documentIds: [],
     });
     expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.code).toBe("SG_AI_OUTPUT_LIMIT");
+    expect(body.error).toContain("response length limit");
     expect(console.error).toHaveBeenCalledWith(
       "Simple Grants AI step unavailable",
       expect.objectContaining({
+        reference: body.reference,
+        inputTokens: 999,
         outputTokens: 100,
         thinkingTokens: 3000,
-        tokenLimit: 4096,
+        tokenLimit: 16384,
         modelVersion: "gemini-3-flash-preview",
       }),
     );
@@ -709,12 +714,16 @@ describe("bounded structured model reliability", () => {
     expect(result.profileDraft).not.toHaveProperty("acnc_registered");
     const configuration = mocks.generateContent.mock.calls[0][0].config;
     expect(configuration.responseSchema).toHaveProperty("properties.profile");
-    expect(configuration.maxOutputTokens).toBe(4096);
+    expect(configuration.responseSchema.properties).not.toHaveProperty(
+      "missing_information",
+    );
+    expect(configuration.maxOutputTokens).toBe(16384);
     expect(configuration).not.toHaveProperty("thinkingConfig");
   });
   it.each([
     { model: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
     { model: "gemini-3-flash-preview", thinking: { thinkingLevel: "MINIMAL" } },
+    { model: "gemini-3.8-flash", thinking: { thinkingLevel: "LOW" } },
   ])(
     "uses thinking controls only for the known compatible $model",
     async ({ model: identifier, thinking }) => {
@@ -739,6 +748,7 @@ describe("bounded structured model reliability", () => {
     {
       result: { text: "{}", candidates: [{ finishReason: "MAX_TOKENS" }] },
       reason: "MODEL_OUTPUT_LIMIT",
+      code: "SG_AI_OUTPUT_LIMIT",
     },
     { result: { text: "" }, reason: "EMPTY_TEXT" },
     { result: { text: "PRIVATE-CANARY-NOT-JSON" }, reason: "INVALID_JSON" },
@@ -748,7 +758,7 @@ describe("bounded structured model reliability", () => {
     },
   ])(
     "logs only bounded output failure reason $reason",
-    async ({ result, reason }) => {
+    async ({ result, reason, code = "SG_AI_RESPONSE" }) => {
       mocks.generateContent.mockResolvedValueOnce(result);
       const response = await call({
         action: "profile",
@@ -758,7 +768,7 @@ describe("bounded structured model reliability", () => {
       });
       const body = await response.json();
       expect(response.status).toBe(502);
-      expect(body.code).toBe("SG_AI_RESPONSE");
+      expect(body.code).toBe(code);
       expect(console.error).toHaveBeenCalledWith(
         "Simple Grants AI step unavailable",
         expect.objectContaining({ failureReason: reason }),

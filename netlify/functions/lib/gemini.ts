@@ -98,11 +98,9 @@ const evidenceSchema = z
 const extractOutputSchema = z.object({
   profile: nullableProfileSchema,
   evidence: evidenceSchema.optional(),
-  missing_information: z.array(z.string().max(1000)).max(40).optional(),
 });
 const verifyOutputSchema = z.object({
   checks: z.array(nullableCheckSchema).max(50),
-  verified_fields: z.array(z.string().max(120)).max(40).optional(),
   recovered_profile: nullableProfileSchema.partial().optional(),
   evidence: evidenceSchema.optional(),
 });
@@ -213,7 +211,8 @@ export interface JSONOutput {
 function compatibleThinking(model: string) {
   if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
     return { thinkingBudget: 0 };
-  if (/^gemini-3(?:\.[0-9]+)?-flash(?:-preview)?$/.test(model))
+  if (model === "gemini-3.8-flash") return { thinkingLevel: ThinkingLevel.LOW };
+  if (/^gemini-3(?:\.0)?-flash(?:-preview)?$/.test(model))
     return { thinkingLevel: ThinkingLevel.MINIMAL };
   return undefined; // In particular, a moving alias must not receive model-specific flags.
 }
@@ -248,6 +247,7 @@ export async function generateJSON(
   );
   if (result.candidates?.[0]?.finishReason === "MAX_TOKENS")
     throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT", {
+      inputTokens: result.usageMetadata?.promptTokenCount,
       outputTokens: result.usageMetadata?.candidatesTokenCount,
       thinkingTokens: result.usageMetadata?.thoughtsTokenCount,
       tokenLimit: output.maxOutputTokens ?? 4096,
@@ -266,6 +266,8 @@ export async function generateJSON(
   ) as Record<string, unknown>;
 }
 export const MAX_AI_EXTRACTED_TEXT_CHARS = 400_000;
+const PROFILE_OUTPUT_TOKENS = 16_384;
+const compactProfileSummary = `Keep the description concise (at most 1200 characters). Omit unknown optional fields and empty arrays. Keep exact legal names and identifiers. Include up to 12 distinct, short evidence quotes of at most 160 characters each, naming the original source. Use the shortest exact phrase that supports each item.`;
 export type DocumentSourceDigest = { documentId: string; sha256: string };
 export function profileSourceFingerprint(
   text: string,
@@ -380,10 +382,10 @@ export async function extractProfileStage(
     );
   const existingContext = `Existing user-entered profile is CONTEXT ONLY, NOT SOURCE EVIDENCE. Do not retain a field merely because it occurs here: ${JSON.stringify(stripSensitive(org.profile))}`;
   const extracted = await generateJSON(
-    `Extract an organisation profile ONLY from the supplied evidence. Keep the description concise (at most 1200 characters). Provide at most 12 representative evidence quotes of at most 240 characters each; never reproduce whole source passages. Return {"profile":{"name":"","legal_name":"","abn":"","type":"","state":"","description":"","focus_areas":[],"website":""},"evidence":[{"field":"","source":"","quote":""}],"missing_information":[]}. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
+    `Extract an organisation profile ONLY from the supplied evidence using every supported field in the response schema. ${compactProfileSummary} Return only profile and evidence. Set name to null if unsupported, and omit acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: extractOutputSchema, maxOutputTokens: 4096 },
+    { schema: extractOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   return {
     profileDraft: normaliseProfile(extracted.profile),
@@ -402,10 +404,10 @@ export async function verifyProfileStage(
 ) {
   const draft: Profile = profileSchema.parse(profileDraft);
   const verification = await generateJSON(
-    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from the proposed profile, including bilingual Chinese/English text, ABN, state, description and focus areas. Return those missing facts only in recovered_profile, with an exact short evidence quote and source name for each recovered field. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[],"recovered_profile":{},"evidence":[{"field":"","source":"","quote":""}]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Inspect the sources for supported facts OMITTED from the proposed profile, including bilingual Chinese/English text, ABN, state, description and focus areas. Return only checks, recovered_profile and evidence. Put omitted supported facts in recovered_profile with the shortest exact supporting quote and original source name per recovered field. Omit unknown optional fields and avoid repeating facts already present in the draft. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Use concise checks for unsupported facts, contradictions and transcriptions. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: verifyOutputSchema, maxOutputTokens: 4096 },
+    { schema: verifyOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   const recovered = verification.recovered_profile
     ? normaliseProfile({
@@ -446,10 +448,10 @@ export async function correctProfileStage(
   const draft = profileSchema.parse(profileDraft),
     checks = checksSchema.parse(profileChecks);
   const corrected = await generateJSON(
-    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Start from the complete proposed profile and change only fields contradicted or unsupported by the originals. Preserve supported ABN, state, description and focus areas, including facts found in bilingual sources. Do not silently omit a populated field: explain every removed fact in checks. A blank field is not a correction unless its evidence is absent or disputed. Keep the description concise (at most 1200 characters), and provide at most 12 representative evidence quotes of at most 240 characters each. Consider every verification finding and preserve every unresolved check. Remove unsupported fields; preserve unresolved contradictions as checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Start from the complete proposed profile and change only fields contradicted or unsupported by the originals. Preserve supported ABN, state, description and focus areas, including facts found in bilingual sources. ${compactProfileSummary} Explain every removed fact in checks. Consider every verification finding and preserve every unresolved check. Use concise checks for unresolved contradictions. Return only profile, checks and evidence. Set name to null if unsupported. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: correctOutputSchema, maxOutputTokens: 6144 },
+    { schema: correctOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   const review = completeProfileReview(
     draft,

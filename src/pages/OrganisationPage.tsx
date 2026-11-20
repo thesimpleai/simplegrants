@@ -52,6 +52,17 @@ const profileProgress: Record<ProfileStage, string> = {
   verify: "Step 2 of 3: Checking details against the originals…",
   correct: "Step 3 of 3: Preparing the corrected draft…",
 };
+const reviewableProfileFields = new Set([
+  "name",
+  "legal_name",
+  "abn",
+  "type",
+  "state",
+  "description",
+  "focus_areas",
+  "website",
+  "acnc_registered",
+]);
 
 const categories = [
   ["registration", "Registration documents"],
@@ -324,7 +335,14 @@ export default function OrganisationPage() {
     setBusy("approve");
     setError("");
     try {
+      // Profiles saved by newer builds may contain fields this form cannot edit.
+      const otherSavedFields = Object.fromEntries(
+        Object.entries(org?.profile ?? {}).filter(
+          ([field]) => !reviewableProfileFields.has(field),
+        ),
+      );
       const reviewedProfile = {
+        ...otherSavedFields,
         ...profile,
         focus_areas: focusText
           .split(",")
