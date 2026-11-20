@@ -637,7 +637,11 @@ export async function executeAI(
           `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Reviewed grant answers describe the organisation. Respect their dates and coverage periods and do not turn them into project facts, budget amounts or current eligibility. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Cite spreadsheet evidence by sheet and cell address. Cached formula results are unverified saved values; unavailable/error results must be listed as missing information, never recalculated or invented. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(approvedApplicationProfileFacts(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(projectFactsForAI(application?.project_details || {}))}\nUser project brief: ${body.text}`,
           parts,
           budget,
-          { schema: draftOutputSchema, maxOutputTokens: 6144 },
+          {
+            schema: draftOutputSchema,
+            maxOutputTokens: 6144,
+            neonWorkflow: "draft_generate",
+          },
         ),
       );
       draft.human_review_required = true;

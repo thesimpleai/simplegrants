@@ -26,13 +26,17 @@ afterEach(() => {
   vi.restoreAllMocks();
   fetchMock.mockReset();
 });
-function failed(status: number, code: string) {
+function failed(
+  status: number,
+  code: string,
+  message = "PRIVATE-DOCUMENT-KEY-CANARY request timed out",
+) {
   return new Response(
     JSON.stringify({
       error: {
         code: status,
         status: code,
-        message: "PRIVATE-DOCUMENT-KEY-CANARY request timed out",
+        message,
         details: [{ quotaMetric: "PRIVATE-QUOTA-ID" }],
       },
     }),
@@ -62,6 +66,68 @@ const success = (
   );
 
 describe("real Gemini SDK HTTP failure handling", () => {
+  it.each([
+    [404, "NOT_FOUND", "The requested Gemini model was not found."],
+    [
+      403,
+      "PERMISSION_DENIED",
+      "Model gemini-4-neon is not available to this project.",
+    ],
+  ])(
+    "uses the configured baseline once when Neon is unavailable (%i)",
+    async (status, code, message) => {
+      vi.stubEnv("GEMINI_MODEL", "gemini-3.8-flash");
+      fetchMock
+        .mockResolvedValueOnce(failed(status, code, message))
+        .mockResolvedValueOnce(success());
+      await expect(
+        generateJSON("Synthetic original excerpts", [], undefined, {
+          neonWorkflow: "setup_conflicts",
+        }),
+      ).resolves.toMatchObject({ profile: { name: "Synthetic Community" } });
+      const attempts = fetchMock.mock.calls.map(([url, init]) => ({
+        url: String(url),
+        body: JSON.parse(String(init?.body)),
+      }));
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0].url).toContain("/gemini-4-neon:generateContent");
+      expect(attempts[1].url).toContain("/gemini-3.8-flash:generateContent");
+      expect(attempts[1].body.contents).toEqual(attempts[0].body.contents);
+      expect(attempts[0].body.generationConfig).not.toHaveProperty(
+        "temperature",
+      );
+    },
+  );
+
+  it("surfaces general project permission errors without a baseline attempt", async () => {
+    fetchMock.mockResolvedValueOnce(
+      failed(403, "PERMISSION_DENIED", "This API key is restricted."),
+    );
+    await expect(
+      generateJSON("Synthetic drafting prompt", [], undefined, {
+        neonWorkflow: "draft_generate",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a Neon policy block without a baseline attempt", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }),
+        {
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    await expect(
+      generateJSON("Synthetic drafting prompt", [], undefined, {
+        neonWorkflow: "draft_generate",
+      }),
+    ).rejects.toMatchObject({ reason: "PROVIDER_BLOCKED" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("recovers once from a verification connection timeout with the same evidence", async () => {
     const retryLog = vi.spyOn(console, "info").mockImplementation(() => {});
     fetchMock

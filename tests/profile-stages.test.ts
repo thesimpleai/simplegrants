@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: mocks.createClient }));
 vi.mock("@google/genai", () => ({
+  ThinkingLevel: { LOW: "LOW" },
   GoogleGenAI: class {
     models = { generateContent: mocks.generateContent };
   },
@@ -637,6 +638,13 @@ describe("source-based grant setup", () => {
     });
     expect(response.status).toBe(200);
     const { setupConflicts } = await response.json();
+    expect(mocks.generateContent.mock.calls[0][0]).toMatchObject({
+      model: "gemini-4-neon",
+      config: {
+        thinkingConfig: { thinkingLevel: "LOW" },
+        maxOutputTokens: 1536,
+      },
+    });
     expect(setupConflicts).toHaveLength(2);
     expect(setupConflicts[0]).toMatchObject({
       questionKey: "legal_name",
