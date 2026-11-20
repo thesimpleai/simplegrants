@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { authorizedJob, jobIds, readJobFile, jobError } from "./lib/ai-jobs";
 import { json } from "./lib/core";
+import { aiJobTiming } from "../../src/lib/ai-job-timing";
 const resultSchema = z.object({
   status: z.number().int().min(200).max(599),
   body: z.unknown(),
@@ -29,7 +30,10 @@ export default async (request: Request) => {
         },
         503,
       );
-    if (Date.now() - metadata.createdAt > 135000)
+    if (
+      Date.now() - metadata.createdAt >
+      aiJobTiming(metadata.profileVerification).statusMs
+    )
       return json(
         {
           error:

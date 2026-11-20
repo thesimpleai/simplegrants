@@ -43,14 +43,16 @@ function failed(status: number, code: string) {
     },
   );
 }
-const success = () =>
+const success = (
+  value: object = { profile: { name: "Synthetic Community" } },
+) =>
   new Response(
     JSON.stringify({
       candidates: [
         {
           content: {
             role: "model",
-            parts: [{ text: '{"profile":{"name":"Synthetic Community"}}' }],
+            parts: [{ text: JSON.stringify(value) }],
           },
           finishReason: "STOP",
         },
@@ -60,6 +62,40 @@ const success = () =>
   );
 
 describe("real Gemini SDK HTTP failure handling", () => {
+  it("recovers once from a verification connection timeout with the same evidence", async () => {
+    const retryLog = vi.spyOn(console, "info").mockImplementation(() => {});
+    fetchMock
+      .mockRejectedValueOnce(
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("Headers timeout"), {
+            code: "UND_ERR_HEADERS_TIMEOUT",
+          }),
+        }),
+      )
+      .mockResolvedValueOnce(success({ checks: [] }));
+    const budget = createAIRequestBudget(210000, 120000);
+    try {
+      const pending = verifyProfileStage(
+        "Synthetic registration evidence",
+        [],
+        { name: "Synthetic Community" },
+        budget,
+      );
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pending).toMatchObject({ profileChecks: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(retryLog).toHaveBeenCalledWith(
+        "Simple Grants AI verification timeout retry",
+        expect.objectContaining({ providerStatus: "OTHER" }),
+      );
+      expect(fetchMock.mock.calls[0][1]?.body).toBe(
+        fetchMock.mock.calls[1][1]?.body,
+      );
+    } finally {
+      budget.close();
+    }
+  });
+
   it("allows a background request to finish after 35 seconds using the real SDK", async () => {
     fetchMock.mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 35000));

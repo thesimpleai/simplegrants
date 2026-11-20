@@ -1,3 +1,5 @@
+import { aiJobTiming, isProfileVerification } from "./ai-job-timing";
+
 /** A phase is queued once; polls retrieve its result without calling Gemini again. */
 export async function requestAIPhase(
   payload: Record<string, unknown>,
@@ -26,7 +28,8 @@ export async function requestAIPhase(
     job.orgId !== payload.orgId
   )
     throw new Error("Invalid AI job response");
-  const deadline = Date.now() + 150000;
+  const deadline =
+    Date.now() + aiJobTiming(isProfileVerification(payload)).browserMs;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     ensureCurrent();

@@ -1,6 +1,11 @@
 import type { Config } from "@netlify/functions";
 import { executeAI } from "./ai";
-import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
+import {
+  createAIRequestBudget,
+  aiFailureResponse,
+  type AIRequestBudget,
+} from "./lib/ai-runtime";
+import { aiJobTiming } from "../../src/lib/ai-job-timing";
 import {
   authorizedJob,
   jobIds,
@@ -11,12 +16,19 @@ import {
 export const config: Config = { background: true };
 export default async (request: Request) => {
   if (request.method !== "POST") return;
+  const startedAt = Date.now();
   let prefix: string | undefined;
   let claimed = false;
-  const budget = createAIRequestBudget(120000, 90000);
+  let budget: AIRequestBudget | undefined;
   try {
     const ids = jobIds.parse(await request.json());
-    ({ prefix } = await authorizedJob(request, ids));
+    const job = await authorizedJob(request, ids);
+    prefix = job.prefix;
+    const timing = aiJobTiming(job.metadata.profileVerification);
+    budget = createAIRequestBudget(
+      Math.max(1, timing.workerMs - (Date.now() - startedAt)),
+      timing.modelMs,
+    );
     const payload = await readJobFile(prefix, "payload.json");
     if (
       !payload ||
@@ -52,7 +64,7 @@ export default async (request: Request) => {
     // Original evidence is no longer needed once a result has been saved.
     await jobStorage().remove([`${prefix}/payload.json`]);
   } catch (error) {
-    if (prefix && claimed) {
+    if (prefix && claimed && budget) {
       const response = aiFailureResponse(error, budget, "background");
       await writeJobFile(prefix, "result.json", {
         status: response.status,
@@ -60,6 +72,6 @@ export default async (request: Request) => {
       });
     }
   } finally {
-    budget.close();
+    budget?.close();
   }
 };

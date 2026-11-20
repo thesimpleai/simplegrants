@@ -17,6 +17,7 @@ import {
   CalendarDays,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import type { ProfileReviewCheckpoint } from "../lib/contracts";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
 import { validateProfileDates } from "../lib/profile-dates";
 import { mergeReviewedProfile } from "../lib/profile-merge";
@@ -133,15 +134,17 @@ export default function OrganisationPage() {
   const [removeId, setRemoveId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const wizardInput = useRef<HTMLInputElement>(null);
+  const profileReview = useRef<ProfileReviewCheckpoint | null>(null);
 
   useEffect(() => {
+    profileReview.current = null;
     setFrequency(org?.notification_frequency ?? "weekly");
     setWizard(false);
     setError("");
     setUploadReport(null);
     setEditingExpiry(null);
     setUploadExpiry("");
-  }, [org?.id]);
+  }, [org?.id, app.user?.id]);
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
   );
@@ -184,6 +187,7 @@ export default function OrganisationPage() {
   );
 
   function openWizard() {
+    profileReview.current = null;
     setWizard(true);
     setStep("sources");
     setHistory("");
@@ -211,6 +215,14 @@ export default function OrganisationPage() {
     setFocusText((org?.focus_areas ?? []).join(", "));
     setChecksConfirmed(false);
     setApproveConfirmed(false);
+  }
+  function closeWizard() {
+    profileReview.current = null;
+    setWizard(false);
+  }
+  function changeProfileSources() {
+    if (profileReview.current) setError("");
+    profileReview.current = null;
   }
   async function upload(files: File[], selectedCategory = category) {
     if (!files.length) return;
@@ -310,7 +322,6 @@ export default function OrganisationPage() {
       return;
     }
     setBusy("profile");
-    setProfileStage("extract");
     setError("");
     try {
       const draft = await app.runAI(
@@ -320,6 +331,7 @@ export default function OrganisationPage() {
           documentIds: selected,
         },
         (stage) => setProfileStage(stage),
+        profileReview,
       );
       if (!draft.profile)
         throw new Error("A profile draft was not returned. Please try again.");
@@ -428,7 +440,7 @@ export default function OrganisationPage() {
         verification_status: "approved",
       };
       await app.updateOrg(patch);
-      setWizard(false);
+      closeWizard();
       app.notify("Organisation details approved and saved.");
     } catch (e) {
       setError(errorMessage(e));
@@ -472,6 +484,7 @@ export default function OrganisationPage() {
     setError("");
     try {
       await app.removeDocument(removeId);
+      if (selected.includes(removeId)) profileReview.current = null;
       setSelected((ids) => ids.filter((id) => id !== removeId));
       setRemoveId(null);
       app.notify("Document removed.");
@@ -913,7 +926,7 @@ export default function OrganisationPage() {
               ? "Let’s get to know your organisation"
               : "Review your organisation details"
           }
-          onClose={() => !busy && setWizard(false)}
+          onClose={() => !busy && closeWizard()}
           wide
         >
           <div className="wizard-progress">
@@ -945,7 +958,10 @@ export default function OrganisationPage() {
                   rows={6}
                   disabled={!!busy}
                   value={history}
-                  onChange={(e) => setHistory(e.target.value)}
+                  onChange={(e) => {
+                    changeProfileSources();
+                    setHistory(e.target.value);
+                  }}
                   placeholder="What does your organisation do? Who do you support? You can paste information from your website, annual report or past applications."
                 />
               </label>
@@ -962,6 +978,7 @@ export default function OrganisationPage() {
                       checked={includeInsurance}
                       disabled={!!busy}
                       onChange={(event) => {
+                        changeProfileSources();
                         setIncludeInsurance(event.target.checked);
                         if (!event.target.checked)
                           setSelected((ids) =>
@@ -1005,13 +1022,14 @@ export default function OrganisationPage() {
                                 selectedBytes + document.size_bytes >
                                   MAX_AI_DOCUMENT_BYTES))
                           }
-                          onChange={(e) =>
+                          onChange={(e) => {
+                            changeProfileSources();
                             setSelected((ids) =>
                               e.target.checked
                                 ? [...ids, document.id]
                                 : ids.filter((id) => id !== document.id),
-                            )
-                          }
+                            );
+                          }}
                         />
                         <FileText size={18} />
                         <span>{document.name}</span>
@@ -1073,7 +1091,7 @@ export default function OrganisationPage() {
                 <button
                   className="button secondary"
                   disabled={!!busy}
-                  onClick={() => setWizard(false)}
+                  onClick={closeWizard}
                 >
                   Cancel
                 </button>
@@ -1252,9 +1270,7 @@ export default function OrganisationPage() {
                 <button
                   className="button secondary"
                   disabled={!!busy}
-                  onClick={() =>
-                    result ? setStep("sources") : setWizard(false)
-                  }
+                  onClick={() => (result ? setStep("sources") : closeWizard())}
                 >
                   {result ? "Back to sources" : "Cancel"}
                 </button>

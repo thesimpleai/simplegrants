@@ -8,9 +8,22 @@ import type {
   Opportunity,
   Organisation,
   OrgData,
+  Profile,
   ProfileStage,
+  ReviewCheck,
   UploadBatchResult,
 } from "../types";
+export interface ProfileReviewCheckpoint {
+  userId: string;
+  orgId: string;
+  text: string;
+  documentIds: readonly string[];
+  sourceFingerprint: string;
+  profileDraft: Profile;
+  profileChecks?: ReviewCheck[];
+  evidence: unknown[];
+}
+
 export interface AppContextValue {
   mode: "demo" | "live";
   configured: boolean;
@@ -48,6 +61,7 @@ export interface AppContextValue {
       message?: string;
     },
     onProgress?: (stage: ProfileStage) => void,
+    profileReview?: { current: ProfileReviewCheckpoint | null },
   ) => Promise<AIResult>;
   refresh: () => Promise<void>;
   repairSourceLinks: () => Promise<{

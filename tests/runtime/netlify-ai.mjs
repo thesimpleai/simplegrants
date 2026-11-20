@@ -1,6 +1,6 @@
 /** Runs the built UI and packaged Netlify bootstrap; no app handlers/SDKs are mocked.
  * The isolated HTTP fixture supplies Auth/PostgREST/Storage and, by default,
- * controlled Gemini responses. --live sends the seven model calls to Gemini.
+ * controlled Gemini responses. --live runs the seven model phases on Gemini.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -58,6 +58,7 @@ const state = {
   errors: [],
   providerFailure: 0,
   profileOutputLimit: false,
+  verificationTimedOut: false,
   delayed: false,
   orgWrites: 0,
 };
@@ -186,28 +187,32 @@ const server = createServer(async (request, response) => {
           },
         });
       }
-      if (state.providerFailure)
+      const verification =
+        !!body.generationConfig?.responseSchema?.properties?.recovered_profile;
+      const simulateVerificationTimeout =
+        !live && verification && !state.verificationTimedOut;
+      const providerFailure =
+        state.providerFailure || (simulateVerificationTimeout ? 504 : 0);
+      if (providerFailure) {
+        if (simulateVerificationTimeout) state.verificationTimedOut = true;
         return json(
           response,
           {
             error: {
-              code: state.providerFailure,
+              code: providerFailure,
               status:
-                state.providerFailure === 400
+                providerFailure === 400
                   ? "INVALID_ARGUMENT"
                   : "DEADLINE_EXCEEDED",
               message: "Controlled provider failure",
             },
           },
-          state.providerFailure,
+          providerFailure,
         );
-      if (
-        !quick &&
-        !state.delayed &&
-        body.generationConfig?.responseSchema?.properties?.recovered_profile
-      ) {
+      }
+      if (!quick && !state.delayed && verification) {
         state.delayed = true;
-        await sleep(31000);
+        await sleep(91000);
       }
       return json(response, providerReply(body));
     }
@@ -478,14 +483,26 @@ try {
     .click();
   await expect(page.getByRole("dialog")).toHaveAccessibleName(
     "Review your organisation details",
-    { timeout: live ? 300000 : 90000 },
+    { timeout: live ? 300000 : quick ? 90000 : 135000 },
   );
   await expect(
     page.getByRole("textbox", { name: "Organisation name", exact: true }),
   ).toHaveValue("Runtime Community Association");
   assert.equal(state.orgWrites, 0);
   assert.equal(state.claims, 3);
-  for (const { body } of state.payloads.slice(0, 3)) {
+  if (!live) {
+    assert.equal(state.verificationTimedOut, true);
+    assert.equal(state.modelCalls, 4);
+    assert.deepEqual(
+      state.payloads.map(({ timeout }) => timeout),
+      ["90", "120", "120", "90"],
+    );
+    if (!quick) assert.ok(Date.now() - start >= 91000);
+    console.log(
+      "PASS: verification retries one Gemini 504, completes review and uses one quota claim for both attempts",
+    );
+  }
+  for (const { body } of state.payloads) {
     assert.equal(body.generationConfig.maxOutputTokens, 16384);
     const sources = JSON.stringify(body.contents);
     for (const document of evidence.filter(
@@ -564,11 +581,17 @@ try {
       ),
   );
   if (live) assert.ok(state.modelCalls >= 7);
-  else assert.equal(state.modelCalls, 7);
+  else assert.equal(state.modelCalls, 8);
   assert.ok(
     quick ? state.polls >= 7 : live ? state.polls >= 7 : state.polls > 7,
   );
-  assert.ok(state.payloads.every((value) => value.timeout === "90"));
+  for (const { body, timeout } of state.payloads) {
+    const verification =
+      !!body.generationConfig?.responseSchema?.properties?.recovered_profile;
+    const maxTimeout = verification ? 120 : 90;
+    assert.ok(Number(timeout) > 0 && Number(timeout) <= maxTimeout);
+    if (!live) assert.equal(Number(timeout), maxTimeout);
+  }
   console.log(
     `PASS: built browser search → signed extraction → persisted canonical source; ${state.modelCalls} model attempts / seven quota claims, polling never charges`,
   );

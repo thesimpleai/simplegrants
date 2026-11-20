@@ -73,10 +73,15 @@ const request = (path = "/api/ai", body?: unknown) =>
     headers: { Authorization: "Bearer secret-session-canary" },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-async function queue() {
+async function queue(profileStage = "extract") {
   const response = await queueAIJob(
     request(),
-    { orgId, action: "profile", text: "private-source-canary" } as {
+    {
+      orgId,
+      action: "profile",
+      profileStage,
+      text: "private-source-canary",
+    } as {
       orgId: string;
     },
     actor,
@@ -167,6 +172,34 @@ describe("background AI jobs", () => {
       blockers: ["Evidence of need is missing"],
     });
   });
+  it.each([
+    ["verify", 120000, 225000],
+    ["extract", 90000, 135000],
+  ])(
+    "uses the recorded worker and status deadlines for profile %s",
+    async (stage, modelMs, statusMs) => {
+      vi.useFakeTimers();
+      const start = Date.now();
+      const ids = await queue(stage);
+      const statusRequest = request(`/api/ai-jobs?${new URLSearchParams(ids)}`);
+      let complete!: (response: Response) => void;
+      const execution = new Promise<Response>((resolve) => {
+        complete = resolve;
+      });
+      mocks.execute.mockImplementationOnce(() => execution);
+      const pendingWorker = worker(request("/worker", ids));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.execute.mock.calls[0][1].modelTimeoutMs).toBe(modelMs);
+      vi.setSystemTime(start + statusMs);
+      expect((await status(statusRequest)).status).toBe(202);
+      vi.setSystemTime(start + statusMs + 1);
+      const expired = await status(statusRequest);
+      expect(expired.status).toBe(504);
+      expect((await expired.json()).code).toBe("SG_AI_TIMEOUT");
+      complete(json({ profile: { name: "Creekside" } }));
+      await pendingWorker;
+    },
+  );
   it("rejects expired jobs and cleans up only expired server job files", async () => {
     vi.useFakeTimers();
     const ids = await queue();
