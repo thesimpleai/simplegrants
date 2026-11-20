@@ -10,7 +10,7 @@ vi.mock("@google/genai", () => ({
   GoogleGenAI: class {
     models = { generateContent: mocks.generateContent };
   },
-  ThinkingLevel: { MINIMAL: "MINIMAL", LOW: "LOW" },
+  ThinkingLevel: { MINIMAL: "MINIMAL", LOW: "LOW", MEDIUM: "MEDIUM" },
 }));
 import handler from "../netlify/functions/ai";
 const orgId = "6a03978d-6266-46b6-b35e-bf8069e50743",
@@ -266,6 +266,9 @@ describe("signed, separate grant discovery phases", () => {
     expect((await second.json()).opportunities).toHaveLength(1);
     expect(mocks.generateContent).toHaveBeenCalledTimes(2);
     expect(mocks.write).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.generateContent.mock.calls.map(([request]) => request.model),
+    ).toEqual(["gemini-flash-latest", "gemini-flash-latest"]);
     expect(mocks.rpc.mock.calls).toEqual([
       ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
       ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
@@ -413,6 +416,19 @@ describe("signed, separate application preparation", () => {
     expect((await response.json()).draft.human_review_required).toBe(true);
     expect(mocks.generateContent).toHaveBeenCalledTimes(2);
     expect(mocks.write).toHaveBeenCalledTimes(1);
+    expect(mocks.generateContent.mock.calls[0][0].model).toBe(
+      "gemini-flash-latest",
+    );
+    expect(mocks.generateContent.mock.calls[1][0]).toMatchObject({
+      model: "gemini-4-neon",
+      config: {
+        thinkingConfig: { thinkingLevel: "MEDIUM" },
+        maxOutputTokens: 6144,
+      },
+    });
+    expect(mocks.generateContent.mock.calls[1][0].config).not.toHaveProperty(
+      "temperature",
+    );
     expect(
       mocks.generateContent.mock.calls[0][0].config.responseSchema,
     ).toHaveProperty("properties.documents");

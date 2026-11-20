@@ -328,22 +328,58 @@ function client() {
     httpOptions: { timeout: 25000 },
   });
 }
+
+const neonModel = "gemini-4-neon";
+
+function neonAccessDenied(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { message, cause } = error as { message?: unknown; cause?: unknown };
+  if (
+    typeof message === "string" &&
+    message.length <= 8000 &&
+    /\bgemini-4-neon\b/i.test(message) &&
+    /\b(?:not available|not accessible|not allowed|access (?:denied|is restricted)|(?:does not|do not) have (?:permission|access)|permission to access)\b/i.test(
+      message,
+    )
+  )
+    return true;
+  return depth < 2 && neonAccessDenied(cause, depth + 1);
+}
+
 export async function generateContent(
   parameters: GenerateContentParameters,
   budget?: AIRequestBudget,
   retryProviderTimeout = false,
+  unavailableFallback?: GenerateContentParameters,
 ) {
   const ownedBudget = budget ? undefined : createAIRequestBudget();
   budget ??= ownedBudget!;
   try {
+    let request = parameters;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await generateContentAttempt(parameters, budget);
+        return await generateContentAttempt(request, budget);
       } catch (error) {
         const failure = providerFailure(error);
-        // Only retry a transient provider call, at most once, leaving time for
-        // useful work. Database writes happen after the complete checked result.
+        // Retries and model fallback share one second attempt and phase budget.
+        // Database writes happen after the complete checked result.
         const remaining = budget.remaining();
+        if (
+          attempt === 0 &&
+          unavailableFallback &&
+          remaining >= 15_000 &&
+          (failure.status === 404 ||
+            (failure.status === 403 && neonAccessDenied(error)))
+        ) {
+          console.info(
+            "Simple Grants Gemini Neon unavailable, using baseline model",
+            {
+              providerStatus: failure.status,
+            },
+          );
+          request = unavailableFallback;
+          continue;
+        }
         const retryable =
           failure.reason === "TIMEOUT"
             ? retryProviderTimeout && remaining >= 60_000
@@ -400,6 +436,7 @@ export interface JSONOutput {
   schema?: z.ZodType;
   maxOutputTokens?: number;
   retryProviderTimeout?: boolean;
+  neonWorkflow?: "draft_generate" | "setup_conflicts";
 }
 export function compatibleThinking(model: string) {
   if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
@@ -418,26 +455,40 @@ export async function generateJSON(
   budget?: AIRequestBudget,
   output: JSONOutput = {},
 ) {
-  const model = process.env.GEMINI_MODEL || defaultModel;
-  const result = await generateContent(
-    {
+  const baseline = process.env.GEMINI_MODEL || defaultModel;
+  const model = output.neonWorkflow ? neonModel : baseline;
+  const schema = output.schema ? geminiOutputSchema(output.schema) : undefined;
+  function parameters(model: string): GenerateContentParameters {
+    const thinkingConfig =
+      model === neonModel && output.neonWorkflow
+        ? {
+            thinkingLevel:
+              output.neonWorkflow === "draft_generate"
+                ? ThinkingLevel.MEDIUM
+                : ThinkingLevel.LOW,
+          }
+        : compatibleThinking(model);
+    return {
       model,
       contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
       config: {
         systemInstruction: `${instructions}\n${profileDateContext()}`,
         responseMimeType: "application/json",
-        temperature: 0.15,
+        ...(model === neonModel ? {} : { temperature: 0.15 }),
         maxOutputTokens: output.maxOutputTokens ?? 4096,
-        ...(output.schema
-          ? { responseSchema: geminiOutputSchema(output.schema) }
-          : {}),
-        ...(compatibleThinking(model)
-          ? { thinkingConfig: compatibleThinking(model) }
-          : {}),
+        ...(schema ? { responseSchema: schema } : {}),
+        ...(thinkingConfig ? { thinkingConfig } : {}),
       },
-    },
+    };
+  }
+  const started = Date.now();
+  const result = await generateContent(
+    parameters(model),
     budget,
     output.retryProviderTimeout,
+    output.neonWorkflow && baseline !== model
+      ? parameters(baseline)
+      : undefined,
   );
   if (
     result.promptFeedback?.blockReason ||
@@ -467,9 +518,23 @@ export async function generateJSON(
   } catch {
     throw new AIExecutionError("response", "INVALID_JSON");
   }
-  return stripSensitive(
+  const checked = stripSensitive(
     output.schema ? output.schema.parse(parsed) : parsed,
   ) as Record<string, unknown>;
+  if (output.neonWorkflow)
+    console.info("Simple Grants Gemini structured response checked", {
+      stage: output.neonWorkflow,
+      modelVersion: /^gemini-[a-z0-9.-]{1,100}$/i.test(
+        result.modelVersion ?? "",
+      )
+        ? result.modelVersion
+        : "unreported",
+      elapsedMs: Date.now() - started,
+      inputTokens: result.usageMetadata?.promptTokenCount,
+      outputTokens: result.usageMetadata?.candidatesTokenCount,
+      thinkingTokens: result.usageMetadata?.thoughtsTokenCount,
+    });
+  return checked;
 }
 export const MAX_AI_EXTRACTED_TEXT_CHARS = 400_000;
 const PROFILE_OUTPUT_TOKENS = 16_384;

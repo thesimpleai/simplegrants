@@ -1,6 +1,6 @@
 /** Runs the built UI and packaged Netlify bootstrap; no app handlers/SDKs are mocked.
  * The isolated HTTP fixture supplies Auth/PostgREST/Storage and, by default,
- * controlled Gemini responses. --live runs the seven model phases on Gemini.
+ * controlled Gemini responses. --live exercises the provider on fictional evidence.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -35,6 +35,9 @@ import {
 const run = promisify(execFile);
 const live = process.argv.includes("--live");
 const quick = process.argv.includes("--quick");
+const flashModel = "gemini-flash-latest";
+const neonModel = "gemini-4-neon";
+const liveFallbacks = [];
 if (live && !process.env.GEMINI_API_KEY)
   throw Error(
     "Add GEMINI_API_KEY through environment secret settings before running --live.",
@@ -61,6 +64,7 @@ const state = {
   setupEvents: [],
   errors: [],
   providerFailure: 0,
+  neonDenials: 0,
   profileOutputLimit: false,
   verificationTimedOut: false,
   delayed: false,
@@ -104,8 +108,36 @@ const json = (response, body, status = 200) => {
   response.end(JSON.stringify(body));
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function modelFromProviderPath(pathname) {
+  const match = /^\/v1(?:beta|alpha)?\/models\/([^/:]+):generateContent$/.exec(
+    pathname,
+  );
+  assert.ok(match, `Unexpected Gemini SDK endpoint ${pathname}`);
+  return match[1];
+}
 let site, browser;
 const handlers = new Map();
+async function completedAIJob(payload, pollingMs) {
+  const response = await originalFetch(`${site}/api/ai`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      "X-Simple-Grants-Async": "1",
+    },
+    body: JSON.stringify({ orgId, ...payload }),
+  });
+  assert.equal(response.status, 202);
+  const job = await response.json();
+  do {
+    await sleep(pollingMs);
+    const result = await originalFetch(
+      `${site}/api/ai-jobs?${new URLSearchParams(job)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (result.status !== 202) return result;
+  } while (true);
+}
 globalThis.awslambda = {
   streamifyResponse: (fn) => fn,
   HttpResponseStream: {
@@ -169,9 +201,11 @@ const server = createServer(async (request, response) => {
         ? JSON.parse(raw)
         : null;
     if (url.pathname === "/gemini-fixture") {
+      const model = modelFromProviderPath(url.searchParams.get("sdkPath"));
       state.modelCalls++;
       state.payloads.push({
         body,
+        model,
         timeout: request.headers["x-server-timeout"],
       });
       if (state.profileOutputLimit) {
@@ -190,6 +224,23 @@ const server = createServer(async (request, response) => {
             thoughtsTokenCount: 1263,
           },
         });
+      }
+      if (
+        model === neonModel &&
+        body.generationConfig?.responseSchema?.properties?.reviews
+      ) {
+        state.neonDenials++;
+        return json(
+          response,
+          {
+            error: {
+              code: 403,
+              status: "PERMISSION_DENIED",
+              message: "Model gemini-4-neon is not available to this project.",
+            },
+          },
+          403,
+        );
       }
       const verification =
         !!body.generationConfig?.responseSchema?.properties?.recovered_profile;
@@ -366,7 +417,9 @@ try {
     SUPABASE_SERVICE_ROLE_KEY: "fixture-service",
     AUTH_APP_URL: "https://simplegrants.com.au",
     AUTH_RATE_LIMIT_SECRET: randomBytes(32).toString("hex"),
-    ...(!live ? { GEMINI_API_KEY: "fixture-gemini" } : {}),
+    ...(!live
+      ? { GEMINI_API_KEY: "fixture-gemini", GEMINI_MODEL: flashModel }
+      : {}),
   });
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init),
@@ -395,12 +448,15 @@ try {
         state.modelCalls++;
         state.payloads.push({
           body: JSON.parse(await request.clone().text()),
+          model: modelFromProviderPath(url.pathname),
           timeout: request.headers.get("x-server-timeout"),
         });
         return originalFetch(request);
       }
+      const fixtureUrl = new URL(`${site}/gemini-fixture`);
+      fixtureUrl.searchParams.set("sdkPath", url.pathname);
       return originalFetch(
-        new Request(`${site}/gemini-fixture`, {
+        new Request(fixtureUrl, {
           method: request.method,
           headers: request.headers,
           body: await request.arrayBuffer(),
@@ -519,7 +575,11 @@ try {
       "PASS: verification retries one Gemini 504, completes review and uses one quota claim for both attempts",
     );
   }
-  for (const { body } of state.payloads) {
+  const ordinaryModel = (
+    live ? process.env.GEMINI_MODEL || flashModel : flashModel
+  ).replace(/^models\//, "");
+  for (const { body, model } of state.payloads) {
+    assert.equal(model, ordinaryModel);
     assert.equal(body.generationConfig.maxOutputTokens, 16384);
     const sources = JSON.stringify(body.contents);
     for (const document of evidence.filter(
@@ -537,6 +597,7 @@ try {
   });
   await page.goto(`${site}/?view=applications&org=${orgId}`);
   await page.locator(".application-row").click();
+  const callsBeforeDraft = state.payloads.length;
   for (const doc of evidence)
     await page
       .getByRole("checkbox", {
@@ -559,6 +620,26 @@ try {
       "Draft exceeded the real question's 80-word limit",
     );
   assert.equal(state.claims, 5);
+  const draftAttempts = state.payloads.slice(callsBeforeDraft);
+  const preflightAttempts = draftAttempts.filter(
+    ({ body }) => body.generationConfig?.responseSchema?.properties?.documents,
+  );
+  const writingAttempts = draftAttempts.filter(
+    ({ body }) => body.generationConfig?.responseSchema?.properties?.sections,
+  );
+  assert.ok(preflightAttempts.length > 0);
+  assert.ok(preflightAttempts.every(({ model }) => model === ordinaryModel));
+  assert.equal(writingAttempts[0]?.model, neonModel);
+  assert.equal(
+    writingAttempts[0]?.body.generationConfig.thinkingConfig?.thinkingLevel,
+    "MEDIUM",
+  );
+  if (!live) assert.equal(writingAttempts.length, 1);
+  const writingModel = writingAttempts.at(-1)?.model;
+  if (writingModel !== neonModel) {
+    assert.equal(writingModel, ordinaryModel);
+    liveFallbacks.push("grant draft generation");
+  }
   const providerInput = state.payloads
     .map((value) => JSON.stringify(value.body))
     .join("\n");
@@ -566,13 +647,14 @@ try {
   assert.match(providerInput, /1000/);
   assert.match(providerInput, /APPROVED ORGANISATION PROFILE/);
   console.log(
-    "PASS: built browser preflight → generated/persisted draft; approved profile, TXT/DOCX/XLSX originals, saved formula evidence and 80-word answer limit",
+    `PASS: preflight uses ${ordinaryModel} and ${writingModel} produced a draft that preserves source evidence and the 80-word answer limit`,
   );
   await page.screenshot({
     path: join(root, "draft-generated.png"),
     fullPage: true,
   });
   await page.goto(`${site}/?view=opportunities&org=${orgId}`);
+  const callsBeforeSearch = state.payloads.length;
   await page
     .getByRole("button", { name: "Find grants with AI", exact: true })
     .first()
@@ -599,6 +681,11 @@ try {
   );
   if (live) assert.ok(state.modelCalls >= 7);
   else assert.equal(state.modelCalls, 8);
+  assert.ok(
+    state.payloads
+      .slice(callsBeforeSearch)
+      .every(({ model }) => model === ordinaryModel),
+  );
   assert.ok(
     quick ? state.polls >= 7 : live ? state.polls >= 7 : state.polls > 7,
   );
@@ -778,7 +865,8 @@ try {
     assert.equal(state.orgWrites, 1);
     assert.deepEqual(state.orgs[0], savedBeforeSetup);
     assert.equal(state.claims, claimsBeforeSetup + 3);
-    assert.equal(state.payloads.length, callsBeforeSetup + 3);
+    assert.equal(state.payloads.length, callsBeforeSetup + 4);
+    assert.equal(state.neonDenials, 1);
     assert.deepEqual(state.setupEvents, [
       ...setupSourceFacts.flatMap(({ id }) => [
         ["queued", "setup-source", [id]],
@@ -787,9 +875,22 @@ try {
       ["queued", "setup-conflicts", []],
       ["completed", "setup-conflicts", []],
     ]);
-    const [firstSource, secondSource, conflict] = state.payloads
-      .slice(callsBeforeSetup)
-      .map(({ body }) => JSON.stringify(body.contents));
+    const setupAttempts = state.payloads.slice(callsBeforeSetup);
+    assert.deepEqual(
+      setupAttempts.map(({ model }) => model),
+      [flashModel, flashModel, neonModel, flashModel],
+    );
+    assert.equal(
+      setupAttempts[2].body.generationConfig.thinkingConfig?.thinkingLevel,
+      "LOW",
+    );
+    assert.equal(
+      setupAttempts[3].body.generationConfig.thinkingConfig,
+      undefined,
+    );
+    const [firstSource, secondSource, conflict, fallbackConflict] =
+      setupAttempts.map(({ body }) => JSON.stringify(body.contents));
+    assert.equal(fallbackConflict, conflict);
     for (const [index, source] of [firstSource, secondSource].entries()) {
       assert.ok(source.includes(setupSourceFacts[index].quote));
       assert.ok(source.includes(setupSourceFacts[index].remainder));
@@ -802,7 +903,51 @@ try {
     }
     assert.ok(!conflict.includes("inlineData"));
     console.log(
-      "PASS: packaged grant setup queues each original after the preceding result, compares excerpts only, and leaves conflicting answers unsaved for review",
+      "PASS: Flash reads each original separately; Neon LOW compares excerpts and falls back on denied access in the same job and quota claim",
+    );
+  }
+  if (live) {
+    const attemptsBeforeConflict = state.payloads.length;
+    const claimsBeforeConflict = state.claims;
+    const originalOrg = structuredClone(state.orgs[0]);
+    const conflict = await completedAIJob(
+      {
+        action: "setup-conflicts",
+        conflicts: [
+          {
+            questionKey: "legal_name",
+            candidates: setupSourceFacts.map(({ value, quote, name }) => ({
+              value,
+              quote,
+              sourceLabel: name,
+            })),
+          },
+        ],
+      },
+      1000,
+    );
+    assert.equal(conflict.status, 200);
+    const [review] = (await conflict.json()).setupConflicts;
+    assert.equal(review.questionKey, "legal_name");
+    assert.deepEqual(
+      review.alternatives.map(({ quote }) => quote),
+      setupSourceFacts.map(({ quote }) => quote),
+    );
+    assert.deepEqual(state.orgs[0], originalOrg);
+    assert.equal(state.claims, claimsBeforeConflict + 1);
+    const attempts = state.payloads.slice(attemptsBeforeConflict);
+    assert.equal(attempts[0]?.model, neonModel);
+    assert.equal(
+      attempts[0]?.body.generationConfig.thinkingConfig?.thinkingLevel,
+      "LOW",
+    );
+    const conflictModel = attempts.at(-1)?.model;
+    if (conflictModel !== neonModel) {
+      assert.equal(conflictModel, ordinaryModel);
+      liveFallbacks.push("setup conflict review");
+    }
+    console.log(
+      `PASS: ${conflictModel} reviewed the fictional excerpts and both original alternatives remain unsaved`,
     );
   }
   const badId = "6589400b-9984-4d38-95d0-606f738b1430";
@@ -820,30 +965,14 @@ try {
   });
   const quotaBeforeBadFile = state.claims,
     modelBeforeBadFile = state.modelCalls;
-  const rejected = await originalFetch(`${site}/api/ai`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      "X-Simple-Grants-Async": "1",
-    },
-    body: JSON.stringify({
+  const fileResult = await completedAIJob(
+    {
       action: "profile",
       profileStage: "extract",
-      orgId,
       documentIds: [badId],
-    }),
-  });
-  assert.equal(rejected.status, 202);
-  const job = await rejected.json();
-  let fileResult;
-  do {
-    await sleep(50);
-    fileResult = await originalFetch(
-      `${site}/api/ai-jobs?${new URLSearchParams(job)}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-  } while (fileResult.status === 202);
+    },
+    50,
+  );
   assert.equal(fileResult.status, 422);
   assert.equal(state.claims, quotaBeforeBadFile);
   assert.equal(state.modelCalls, modelBeforeBadFile);
@@ -856,6 +985,11 @@ try {
     path: join(root, "verified-ui.png"),
     fullPage: true,
   });
+  assert.equal(
+    liveFallbacks.length,
+    0,
+    `Live Neon could not be verified because Flash handled ${liveFallbacks.join(" and ")}.`,
+  );
   console.log(
     `PASS: packaged AI runtime/browser suite complete. Evidence: ${root}`,
   );
