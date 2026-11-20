@@ -248,9 +248,9 @@ test("the organisation switcher closes on Escape or an outside click and steps h
     .click();
   await expect(page.locator(".org-dropdown")).toHaveCount(0);
   await expect(page.locator(".simple-steps li")).toHaveText([
-    "Read your source documents",
-    "Check facts against the originals",
-    "Correct differences for your review",
+    "Find answers one source at a time",
+    "Compare any disagreements",
+    "Review answers and see what evidence is missing",
   ]);
   await expect(page.locator(".simple-steps li span")).toHaveCount(0);
 });
