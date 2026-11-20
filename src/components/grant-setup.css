@@ -26,6 +26,24 @@
   margin-block-start: 0.8rem;
 }
 
+.grant-setup textarea.grant-setup-answer {
+  display: block;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  min-block-size: 9rem;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+@supports (field-sizing: content) {
+  .grant-setup textarea.grant-setup-answer {
+    field-sizing: content;
+    max-block-size: min(30rem, 60dvh);
+  }
+}
+
 .grant-setup-evidence {
   display: grid;
   gap: 0.65rem;

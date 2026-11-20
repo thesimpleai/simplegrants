@@ -12,6 +12,8 @@ import {
 import {
   aggregateSetupEvidence,
   chooseSetupAnswer,
+  isSetupQuestionKey,
+  readSetupAnswers,
   setupProfileAnswer,
   setupQuestionnaire,
   suggestSetupDocuments,
@@ -23,15 +25,97 @@ import {
   type SetupQuestionKey,
   type SetupSuggestion,
 } from "../lib/setup-questionnaire";
+import {
+  loadSetupReviewDraft,
+  removeSetupReviewDraft,
+  saveSetupReviewDraft,
+} from "../lib/setup-review-draft";
 import { Busy, Modal, Notice, errorMessage } from "./ui";
 import "./grant-setup.css";
 
 type Question = SetupQuestion & { key: SetupQuestionKey };
 type Edit = SetupAnswer | null;
 type Edits = Partial<Record<SetupQuestionKey, Edit>>;
-type ConflictReview = NonNullable<AIResult["setupConflicts"]>[number];
+type ConflictReview = Pick<
+  NonNullable<AIResult["setupConflicts"]>[number],
+  "note" | "recommendedAlternative"
+>;
+type ConflictReviews = Partial<Record<SetupQuestionKey, ConflictReview>>;
 
 const sections = [...new Set(setupQuestionnaire.map(({ section }) => section))];
+
+function draftSourceIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((id): id is string => typeof id === "string")
+    : [];
+}
+
+function draftEdits(value: unknown): Edits {
+  const edits: Edits = readSetupAnswers(value);
+  if (!value || typeof value !== "object") return edits;
+  const stored = value as Record<string, unknown>;
+  for (const { key, kind } of setupQuestionnaire) {
+    const answer = stored[key];
+    if (answer === null) edits[key] = null;
+    if (edits[key] || !answer || typeof answer !== "object") continue;
+    if (
+      !("status" in answer) ||
+      answer.status !== "confirmed" ||
+      !("value" in answer)
+    )
+      continue;
+
+    // A draft can contain incomplete dates, lists and metrics while being edited.
+    const input = answer.value;
+    if (
+      ((kind === "date" || kind === "text") && typeof input === "string") ||
+      (kind === "list" &&
+        Array.isArray(input) &&
+        input.every((item) => typeof item === "string"))
+    ) {
+      edits[key] = { status: "confirmed", value: input };
+    } else if (
+      kind === "metric" &&
+      input &&
+      typeof input === "object" &&
+      "value" in input &&
+      (input.value === null || typeof input.value === "number") &&
+      "unit" in input &&
+      typeof input.unit === "string" &&
+      "periodStart" in input &&
+      typeof input.periodStart === "string" &&
+      "periodEnd" in input &&
+      typeof input.periodEnd === "string"
+    ) {
+      edits[key] = {
+        status: "confirmed",
+        value: {
+          value: input.value ?? NaN,
+          unit: input.unit,
+          periodStart: input.periodStart,
+          periodEnd: input.periodEnd,
+        },
+      };
+    }
+  }
+  return edits;
+}
+
+function draftConflictReviews(value: unknown): ConflictReviews {
+  if (!value || typeof value !== "object") return {};
+  const result: ConflictReviews = {};
+  for (const [key, review] of Object.entries(value)) {
+    if (!isSetupQuestionKey(key) || !review || typeof review !== "object")
+      continue;
+    result[key] = {
+      note: typeof review.note === "string" ? review.note : undefined,
+      recommendedAlternative: Number.isInteger(review.recommendedAlternative)
+        ? review.recommendedAlternative
+        : undefined,
+    };
+  }
+  return result;
+}
 
 function supportedBy(
   question: Question,
@@ -143,8 +227,9 @@ function AnswerInput({
   if (question.kind === "list") {
     return (
       <textarea
+        className="grant-setup-answer"
         aria-label={question.label}
-        rows={2}
+        rows={4}
         placeholder="One item per line"
         value={Array.isArray(value) ? value.join("\n") : ""}
         onChange={(event) =>
@@ -169,8 +254,9 @@ function AnswerInput({
     />
   ) : (
     <textarea
+      className="grant-setup-answer"
       aria-label={question.label}
-      rows={2}
+      rows={5}
       maxLength={1500}
       value={typeof value === "string" ? value : ""}
       onChange={(event) => onChange(event.target.value || undefined)}
@@ -192,9 +278,7 @@ export default function GrantSetupWizard({
     ...saved.answers,
     ...Object.fromEntries(saved.unresolved.map((key) => [key, null])),
   }));
-  const [reviews, setReviews] = useState<
-    Partial<Record<SetupQuestionKey, ConflictReview>>
-  >({});
+  const [reviews, setReviews] = useState<ConflictReviews>({});
   const [selected, setSelected] = useState<string[]>([]);
   const [insurance, setInsurance] = useState(false);
   const [paste, setPaste] = useState("");
@@ -206,6 +290,12 @@ export default function GrantSetupWizard({
   const [error, setError] = useState("");
   const [saveConfirmed, setSaveConfirmed] = useState(false);
   const [approveProfile, setApproveProfile] = useState(false);
+  const draftActor = app.mode === "demo" ? undefined : app.user?.id;
+  const [loadingDraft, setLoadingDraft] = useState(Boolean(draftActor));
+  const [draftSaved, setDraftSaved] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [draftError, setDraftError] = useState("");
+  const draftLoadFailed = useRef(false);
   const active = useRef(true);
 
   useEffect(() => {
@@ -214,6 +304,36 @@ export default function GrantSetupWizard({
       active.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!draftActor) return;
+    let cancelled = false;
+    loadSetupReviewDraft(organisation.id, draftActor, "grant-setup")
+      .then((draft) => {
+        if (cancelled || draft?.data.version !== 1) return;
+        const data = draft.data;
+        setEvidence(readGrantSetupEvidence(data.evidence));
+        setEdits(draftEdits(data.edits));
+        setReviews(draftConflictReviews(data.reviews));
+        setSelected(draftSourceIds(data.selected));
+        setCompleted(draftSourceIds(data.completed));
+        setInsurance(data.insurance === true);
+        setDraftSaved(true);
+        setReviewing(true);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          draftLoadFailed.current = true;
+          setDraftError(errorMessage(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDraft(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [draftActor, organisation.id]);
 
   const groups = useMemo(() => aggregateSetupEvidence(evidence), [evidence]);
   const availableSources = app.data.documents.filter(
@@ -259,12 +379,14 @@ export default function GrantSetupWizard({
 
   function editAnswer(key: SetupQuestionKey, answer: Edit) {
     setEdits((current) => ({ ...current, [key]: answer }));
+    setDraftDirty(true);
     setSaveConfirmed(false);
   }
 
   function recordNewEvidence(
     previous: SetupSuggestion[],
     incoming: SetupSuggestion[],
+    currentEdits: Edits,
     documentId?: string,
   ) {
     const next = previous
@@ -272,26 +394,76 @@ export default function GrantSetupWizard({
       .concat(incoming);
     const before = aggregateSetupEvidence(previous);
     const after = aggregateSetupEvidence(next);
-    setEdits((current) => {
-      const updates = { ...current };
-      for (const question of setupQuestionnaire) {
-        const prior = current[question.key] ?? baseline(question);
-        if (!prior) continue;
-        const alternatives = after[question.key]?.alternatives ?? [];
-        const oldAlternatives = before[question.key]?.alternatives ?? [];
-        const addedDifferent = alternatives.some(
-          (alternative) =>
-            !supportedBy(question, alternative.value, oldAlternatives) &&
-            (prior.status !== "confirmed" ||
-              !supportedBy(question, prior.value, [alternative])),
-        );
-        if (addedDifferent) updates[question.key] = null;
-      }
-      return updates;
-    });
+    const updates = { ...currentEdits };
+    for (const question of setupQuestionnaire) {
+      const prior = currentEdits[question.key] ?? baseline(question);
+      if (!prior) continue;
+      const alternatives = after[question.key]?.alternatives ?? [];
+      const oldAlternatives = before[question.key]?.alternatives ?? [];
+      const addedDifferent = alternatives.some(
+        (alternative) =>
+          !supportedBy(question, alternative.value, oldAlternatives) &&
+          (prior.status !== "confirmed" ||
+            !supportedBy(question, prior.value, [alternative])),
+      );
+      if (addedDifferent) updates[question.key] = null;
+    }
+    setEdits(updates);
     setSaveConfirmed(false);
     setEvidence(next);
-    return next;
+    return { evidence: next, edits: updates };
+  }
+
+  async function persistDraft(
+    evidence: SetupSuggestion[],
+    edits: Edits,
+    completed: string[],
+    reviews: ConflictReviews,
+  ) {
+    if (!draftActor) return false;
+    try {
+      if (draftLoadFailed.current) {
+        const previous = await loadSetupReviewDraft(
+          organisation.id,
+          draftActor,
+          "grant-setup",
+        );
+        if (previous)
+          throw new Error(
+            "A saved draft already exists. Reopen this form to review it.",
+          );
+        draftLoadFailed.current = false;
+      }
+
+      await saveSetupReviewDraft(organisation.id, draftActor, "grant-setup", {
+        version: 1,
+        evidence,
+        edits,
+        completed,
+        selected,
+        insurance,
+        reviews,
+      });
+      if (active.current) {
+        setDraftSaved(true);
+        setDraftDirty(false);
+        setDraftError("");
+      }
+      return true;
+    } catch (e) {
+      if (active.current) setDraftError(errorMessage(e));
+      return false;
+    }
+  }
+
+  async function saveDraftAndClose() {
+    if (progress || loadingDraft) return;
+    setProgress("Saving your draft");
+    const savedDraft = await persistDraft(evidence, edits, completed, reviews);
+    if (active.current) {
+      setProgress("");
+      if (savedDraft) onClose();
+    }
   }
 
   async function checkConflicts(current: SetupSuggestion[]) {
@@ -309,7 +481,7 @@ export default function GrantSetupWizard({
         },
       ];
     });
-    const checked: Partial<Record<SetupQuestionKey, ConflictReview>> = {};
+    const checked: ConflictReviews = {};
     for (let start = 0; start < conflicts.length; start += 12) {
       setProgress("Checking conflicting excerpts");
       const batch = conflicts.slice(start, start + 12);
@@ -321,7 +493,10 @@ export default function GrantSetupWizard({
         if (!active.current) return;
         for (const item of result.setupConflicts ?? []) {
           if (batch.some(({ questionKey }) => questionKey === item.questionKey))
-            checked[item.questionKey] = item;
+            checked[item.questionKey] = {
+              note: item.note,
+              recommendedAlternative: item.recommendedAlternative,
+            };
         }
       } catch (e) {
         if (!active.current) return;
@@ -331,6 +506,7 @@ export default function GrantSetupWizard({
       }
     }
     if (active.current) setReviews(checked);
+    return checked;
   }
 
   async function analyseSources() {
@@ -347,7 +523,9 @@ export default function GrantSetupWizard({
     if (pasted && pasted !== analysedPaste)
       sources.push({ label: "Pasted information", text: pasted });
     if (!sources.length) return;
-    let current = evidence;
+    let current = { evidence, edits };
+    let currentCompleted = completed;
+    let finishedSource = false;
     setError("");
     setReviews({});
     for (const [index, source] of sources.entries()) {
@@ -369,14 +547,30 @@ export default function GrantSetupWizard({
         const suggestions = readGrantSetupEvidence(
           result.setupSuggestions,
         ).filter((suggestion) => suggestion.documentId === id);
-        current = recordNewEvidence(current, suggestions, id);
-        if (id) setCompleted((ids) => [...ids, id]);
-        else setAnalysedPaste(pasted);
+        current = recordNewEvidence(
+          current.evidence,
+          suggestions,
+          current.edits,
+          id,
+        );
+        if (id) {
+          currentCompleted = [...currentCompleted, id];
+          setCompleted(currentCompleted);
+        } else setAnalysedPaste(pasted);
         setSourceErrors((errors) => {
           const next = { ...errors };
           delete next[key];
           return next;
         });
+        finishedSource = true;
+        setDraftDirty(true);
+        await persistDraft(
+          current.evidence,
+          current.edits,
+          currentCompleted,
+          {},
+        );
+        if (!active.current) return;
       } catch (e) {
         if (!active.current) return;
         setSourceErrors((errors) => ({
@@ -385,7 +579,19 @@ export default function GrantSetupWizard({
         }));
       }
     }
-    await checkConflicts(current);
+    const checked = await checkConflicts(current.evidence);
+    if (
+      active.current &&
+      finishedSource &&
+      checked &&
+      Object.keys(checked).length
+    )
+      await persistDraft(
+        current.evidence,
+        current.edits,
+        currentCompleted,
+        checked,
+      );
     if (active.current) {
       setReviewing(true);
       setProgress("");
@@ -448,8 +654,20 @@ export default function GrantSetupWizard({
           approveProfile && mayApprove,
         ),
       );
+      let cleanupMessage = "";
+      if (
+        draftActor &&
+        (draftSaved || (draftError && !draftLoadFailed.current))
+      )
+        await removeSetupReviewDraft(
+          organisation.id,
+          draftActor,
+          "grant-setup",
+        ).catch((e) => {
+          cleanupMessage = errorMessage(e);
+        });
       if (active.current) {
-        app.notify("Reviewed grant answers saved.");
+        app.notify(cleanupMessage || "Reviewed grant answers saved.");
         onClose();
       }
     } catch (e) {
@@ -485,6 +703,16 @@ export default function GrantSetupWizard({
             {error}
           </p>
         )}
+        {draftError && (
+          <p className="form-error" role="alert">
+            {draftError}
+          </p>
+        )}
+        {draftSaved && !draftDirty && !draftError && !progress && (
+          <p className="small muted" role="status">
+            Draft saved for later.
+          </p>
+        )}
         {progress && (
           <p role="status">
             <Busy label={progress} />
@@ -500,7 +728,11 @@ export default function GrantSetupWizard({
             </ul>
           </Notice>
         )}
-        {!reviewing ? (
+        {loadingDraft ? (
+          <p role="status">
+            <Busy label="Opening your grant setup" />
+          </p>
+        ) : !reviewing ? (
           <>
             <p className="muted">
               Build a reusable set of grant answers. Your assistant works
@@ -525,6 +757,7 @@ export default function GrantSetupWizard({
             <label>
               Paste a public or redacted excerpt
               <textarea
+                className="grant-setup-answer"
                 maxLength={30000}
                 rows={4}
                 value={paste}
@@ -671,6 +904,28 @@ export default function GrantSetupWizard({
                       >
                         <legend>{question.label}</legend>
                         <p className="small muted">{question.help}</p>
+                        {answer?.status !== "not_applicable" ? (
+                          <AnswerInput
+                            question={question}
+                            value={
+                              answer?.status === "confirmed"
+                                ? answer.value
+                                : undefined
+                            }
+                            onChange={(value) =>
+                              editAnswer(
+                                question.key,
+                                value === undefined
+                                  ? null
+                                  : { status: "confirmed", value },
+                              )
+                            }
+                          />
+                        ) : (
+                          <p className="small muted">
+                            Marked as not applicable.
+                          </p>
+                        )}
                         {group && (
                           <div className="grant-setup-evidence">
                             {group.hasConflict && (
@@ -772,28 +1027,6 @@ export default function GrantSetupWizard({
                               Keep saved answer · {displayValue(previous.value)}
                             </button>
                           )}
-                        {answer?.status !== "not_applicable" ? (
-                          <AnswerInput
-                            question={question}
-                            value={
-                              answer?.status === "confirmed"
-                                ? answer.value
-                                : undefined
-                            }
-                            onChange={(value) =>
-                              editAnswer(
-                                question.key,
-                                value === undefined
-                                  ? null
-                                  : { status: "confirmed", value },
-                              )
-                            }
-                          />
-                        ) : (
-                          <p className="small muted">
-                            Marked as not applicable.
-                          </p>
-                        )}
                         <div className="section-actions">
                           {answer && (
                             <button
@@ -871,6 +1104,15 @@ export default function GrantSetupWizard({
               >
                 Save reviewed answers
               </button>
+              {draftActor && (
+                <button
+                  className="button secondary"
+                  disabled={!!progress}
+                  onClick={saveDraftAndClose}
+                >
+                  Save draft and close
+                </button>
+              )}
               <button
                 className="button secondary"
                 disabled={!!progress}

@@ -91,6 +91,11 @@ async function prepareDocuments(
     uploads: [] as { path: string; mime: string; bytes: number }[],
     inserts: [] as Record<string, unknown>[],
     ai: [] as Record<string, unknown>[],
+    setupDrafts: new Map<
+      string,
+      { data: Record<string, unknown>; updatedAt: number }
+    >(),
+    setupDraftRequests: [] as { method: string; orgId: string; kind: string }[],
     recordRequests: 0,
     open: [] as { path: string; expires: number; options?: unknown }[],
     failUploadAt: 0,
@@ -179,6 +184,45 @@ storage:{from:bucket=>({upload:async(path,file,options)=>{const response=await f
         error: null,
       },
     });
+  });
+  await page.route("**/api/setup-review-drafts?*", (route) => {
+    const request = route.request();
+    const { searchParams } = new URL(request.url());
+    const target = searchParams.get("orgId");
+    const kind = searchParams.get("kind");
+    if (!target || (kind !== "profile" && kind !== "grant-setup"))
+      return route.fulfill({
+        status: 400,
+        json: { error: "Invalid draft type" },
+      });
+    if (request.headers().authorization !== "Bearer test-access")
+      return route.fulfill({
+        status: 401,
+        json: { error: "Sign in required" },
+      });
+    const key = `${target}:${kind}`;
+    const method = request.method();
+    state.setupDraftRequests.push({ method, orgId: target, kind });
+    switch (method) {
+      case "GET":
+        return route.fulfill({
+          json: { draft: state.setupDrafts.get(key) ?? null },
+        });
+      case "PUT": {
+        const { data } = request.postDataJSON();
+        const updatedAt = Date.now();
+        state.setupDrafts.set(key, { data, updatedAt });
+        return route.fulfill({ json: { updatedAt } });
+      }
+      case "DELETE":
+        state.setupDrafts.delete(key);
+        return route.fulfill({ json: { removed: true } });
+      default:
+        return route.fulfill({
+          status: 405,
+          json: { error: "Invalid method" },
+        });
+    }
   });
   return state;
 }
@@ -310,6 +354,188 @@ test("grant setup retries only failed sources, keeps conflicting evidence and wa
     },
     evidence: [first, second],
   });
+});
+
+for (const viewportWidth of [1280, 390]) {
+  test(`grant setup draft answer is readable at ${viewportWidth}px`, async ({
+    page,
+  }) => {
+    const description =
+      "Creekside Community Hub runs weekly food relief and wellbeing workshops for local families. Trained volunteers also help older residents find services and stay socially connected.";
+    const quote =
+      "Creekside Community Hub runs weekly food relief and wellbeing workshops for local families.";
+    await page.setViewportSize({ width: viewportWidth, height: 900 });
+    await prepareDocuments(page, initialDocuments, {
+      profile: {
+        name: "Creekside Community Hub",
+        grant_setup: {
+          version: 1,
+          answers: { description: { status: "confirmed", value: description } },
+          evidence: [
+            {
+              questionKey: "description",
+              value: description,
+              quote,
+              sourceLabel: initialDocuments[0].name,
+              documentId: initialDocuments[0].id,
+              quoteVerified: true,
+            },
+          ],
+        },
+      },
+    });
+    await page.goto("/?view=organisation");
+    await page.getByRole("button", { name: "Set up for grants" }).click();
+    await page
+      .getByRole("button", { name: "Review or answer manually" })
+      .click();
+    const review = page.getByRole("dialog", {
+      name: "Review grant setup answers",
+    });
+    await review
+      .locator("summary")
+      .filter({ hasText: "Purpose and community" })
+      .click();
+
+    const question = "What does the organisation do?";
+    const editor = review.getByRole("textbox", { name: question, exact: true });
+    await expect(editor).toHaveValue(description);
+    const dimensions = await editor.evaluate((element) => {
+      const fieldset = element.closest("fieldset")!;
+      const quote = fieldset.querySelector("blockquote")!;
+      const dialog = fieldset.closest('[role="dialog"]')!;
+      const styles = getComputedStyle(fieldset);
+      return {
+        editorWidth: element.getBoundingClientRect().width,
+        editorHeight: element.clientHeight,
+        editorContentHeight: element.scrollHeight,
+        fieldWidth:
+          fieldset.clientWidth -
+          parseFloat(styles.paddingLeft) -
+          parseFloat(styles.paddingRight),
+        fieldOverflows: fieldset.scrollWidth > fieldset.clientWidth + 1,
+        dialogOverflows: dialog.scrollWidth > dialog.clientWidth + 1,
+        editorPrecedesQuote:
+          (element.compareDocumentPosition(quote) &
+            Node.DOCUMENT_POSITION_FOLLOWING) !==
+          0,
+      };
+    });
+    expect(dimensions.editorWidth).toBeGreaterThanOrEqual(
+      dimensions.fieldWidth - 4,
+    );
+    expect(dimensions.editorHeight).toBeGreaterThanOrEqual(120);
+    expect(dimensions.editorContentHeight).toBeLessThanOrEqual(
+      dimensions.editorHeight + 1,
+    );
+    expect(dimensions.fieldOverflows).toBe(false);
+    expect(dimensions.dialogOverflows).toBe(false);
+    expect(dimensions.editorPrecedesQuote).toBe(true);
+  });
+}
+
+test("grant setup resumes a private draft across reloads and clears it only after reviewed answers are saved", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const key = `${orgId}:grant-setup`;
+  const source = initialDocuments[0];
+  const extractedName = "Creekside Community Network Inc";
+  const reviewedName = "Creekside Community Network Incorporated";
+  const quote = `Registered name: ${extractedName}`;
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    return route.fulfill({
+      json: {
+        setupSuggestions: [
+          {
+            questionKey: "legal_name",
+            value: extractedName,
+            quote,
+            sourceLabel: source.name,
+            documentId: source.id,
+            quoteVerified: true,
+          },
+        ],
+      },
+    });
+  });
+  const setup = page.getByRole("button", { name: "Set up for grants" });
+  const review = page.getByRole("dialog", {
+    name: "Review grant setup answers",
+  });
+  const legalName = review.getByRole("textbox", {
+    name: "What is your registered legal name?",
+  });
+  const approval = review.getByRole("checkbox", {
+    name: "I approve the core organisation profile for grant drafting.",
+  });
+  const confirmed = review.getByRole("checkbox", {
+    name: /I’ve checked the answers/,
+  });
+  const save = review.getByRole("button", { name: "Save reviewed answers" });
+  async function openLegalIdentity() {
+    await review
+      .locator("summary")
+      .filter({ hasText: "Legal identity and eligibility" })
+      .click();
+  }
+
+  await page.goto("/?view=organisation");
+  await setup.click();
+  await page.getByRole("checkbox", { name: source.name, exact: true }).check();
+  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await expect(review).toBeVisible();
+  await expect(
+    review.getByText("Draft saved for later.", { exact: true }),
+  ).toBeVisible();
+  await expect.poll(() => state.setupDrafts.has(key)).toBe(true);
+  expect(state.updates).toHaveLength(0);
+  await review.getByRole("button", { name: "Close dialog" }).click();
+  await expect(review).toHaveCount(0);
+
+  await page.reload();
+  await setup.click();
+  await expect(review).toBeVisible();
+  await openLegalIdentity();
+  await expect(legalName).toHaveValue(extractedName);
+  await expect(review.getByText(quote, { exact: true })).toBeAttached();
+  await expect(confirmed).not.toBeChecked();
+  expect(state.updates).toHaveLength(0);
+
+  await legalName.fill(reviewedName);
+  await approval.check();
+  await confirmed.check();
+  await review.getByRole("button", { name: "Save draft and close" }).click();
+  await expect(review).toHaveCount(0);
+  expect(state.setupDrafts.has(key)).toBe(true);
+  expect(state.updates).toHaveLength(0);
+  expect(state.organisations[0].verification_status).toBe("draft");
+
+  await page.reload();
+  await setup.click();
+  await expect(review).toBeVisible();
+  await openLegalIdentity();
+  await expect(legalName).toHaveValue(reviewedName);
+  await expect(save).toBeDisabled();
+  await approval.check();
+  await confirmed.check();
+  await save.click();
+  await expect(review).toHaveCount(0);
+  await expect.poll(() => state.setupDrafts.has(key)).toBe(false);
+  expect(state.updates).toHaveLength(1);
+  expect(state.organisations[0]).toMatchObject({
+    verification_status: "approved",
+    profile: { legal_name: reviewedName },
+  });
+  expect(state.ai).toHaveLength(1);
+
+  await page.reload();
+  await setup.click();
+  await expect(
+    page.getByRole("dialog", { name: "Set up your organisation for grants" }),
+  ).toBeVisible();
 });
 
 test("expanded details preserve approved values, require approval and survive a saved profile round trip", async ({
@@ -1317,4 +1543,82 @@ test("a safe backend AI support reference is visible without exposing its raw pa
   await expect(
     page.getByRole("button", { name: "Prepare my profile", exact: true }),
   ).toBeEnabled();
+});
+
+test("a prepared profile autosaves its review and resumes after reload without approving", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const key = `${orgId}:profile`;
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    return route.fulfill({ json: stageResult(body) });
+  });
+  const review = page.getByRole("dialog", {
+    name: "Review your organisation details",
+  });
+  const name = review.getByRole("textbox", {
+    name: "Organisation name",
+    exact: true,
+  });
+  const approval = review.getByRole("checkbox", {
+    name: /I have checked these details and approve them/,
+  });
+  const differences = review.getByRole("checkbox", {
+    name: /I checked these differences against the originals/,
+  });
+  const approve = review.getByRole("button", { name: "Approve and save" });
+  const resume = page.getByRole("button", { name: "Resume profile draft" });
+
+  await openProfile(page);
+  await page.getByRole("button", { name: "Prepare my profile" }).click();
+  await expect(name).toHaveValue("Corrected Community");
+  await expect(review.getByText(/Draft saved. You can return/)).toBeVisible();
+  expect(state.setupDrafts.get(key)?.data).toMatchObject({
+    profile: { name: "Corrected Community" },
+    result: { evidence: finalResult.evidence, checks: profileChecks },
+  });
+  expect(state.updates).toHaveLength(0);
+
+  await name.fill("Corrected and reviewed Community");
+  await expect
+    .poll(() => state.setupDrafts.get(key)?.data.profile)
+    .toMatchObject({ name: "Corrected and reviewed Community" });
+  await differences.check();
+  await approval.check();
+  await review.getByRole("button", { name: "Save draft and close" }).click();
+  await expect(review).toHaveCount(0);
+  expect(state.organisations[0].verification_status).toBe("draft");
+
+  await page.reload();
+  await resume.click();
+  await expect(name).toHaveValue("Corrected and reviewed Community");
+  await expect(review.getByText(profileChecks[0].issue)).toBeVisible();
+  await expect(approval).not.toBeChecked();
+  await expect(differences).not.toBeChecked();
+  await expect(approve).toBeDisabled();
+  expect(state.ai).toHaveLength(3);
+  expect(state.updates).toHaveLength(0);
+
+  await differences.check();
+  await approval.check();
+  state.failUpdate = true;
+  await approve.click();
+  await expect(review.getByRole("alert")).toContainText("could not be saved");
+  expect(state.setupDrafts.has(key)).toBe(true);
+  expect(
+    state.setupDraftRequests.some((request) => request.method === "DELETE"),
+  ).toBe(false);
+  state.failUpdate = false;
+  await approve.click();
+  await expect(review).toHaveCount(0);
+  expect(state.setupDrafts.has(key)).toBe(false);
+  expect(state.organisations[0]).toMatchObject({
+    verification_status: "approved",
+    name: "Corrected and reviewed Community",
+  });
+  await expect(
+    page.getByRole("button", { name: "Update with AI" }),
+  ).toBeVisible();
 });

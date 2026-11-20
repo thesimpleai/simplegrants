@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Building2,
   Check,
@@ -22,6 +22,11 @@ import GrantSetupWizard from "../components/GrantSetupWizard";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
 import { validateProfileDates } from "../lib/profile-dates";
 import { mergeReviewedProfile } from "../lib/profile-merge";
+import {
+  loadSetupReviewDraft,
+  removeSetupReviewDraft,
+  saveSetupReviewDraft,
+} from "../lib/setup-review-draft";
 import {
   ProfileDetailsForm,
   ProfileDetailsSummary,
@@ -103,6 +108,81 @@ const evidenceText = (value: unknown): string =>
           .join(" · ")
       : String(value);
 
+type ProfileReviewResult = Pick<AIResult, "sourceFingerprint" | "message"> & {
+  profile: Profile;
+  checks: ReviewCheck[];
+  evidence: unknown[];
+};
+type PendingProfileReview = {
+  version: 1;
+  profile: Profile;
+  focusText: string;
+  result: ProfileReviewResult;
+  selected: string[];
+  includeInsurance: boolean;
+};
+type ProfileReviewDraft = {
+  scope: string;
+  review: PendingProfileReview;
+  status: "saving" | "saved" | "unsaved";
+};
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+const isTextList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+const isReviewProfile = (value: unknown): value is Profile =>
+  isRecord(value) &&
+  typeof value.name === "string" &&
+  ["abn", "type", "state", "description", "website"].every(
+    (key) => value[key] === undefined || typeof value[key] === "string",
+  ) &&
+  ["focus_areas", "beneficiaries", "service_locations"].every(
+    (key) => value[key] === undefined || isTextList(value[key]),
+  );
+function readPendingProfileReview(
+  data: Record<string, unknown>,
+): PendingProfileReview | null {
+  const { profile, result, focusText, selected, includeInsurance } = data;
+  if (
+    data.version !== 1 ||
+    !isReviewProfile(profile) ||
+    !isRecord(result) ||
+    !isReviewProfile(result.profile) ||
+    !Array.isArray(result.checks) ||
+    !result.checks.every(
+      (check) =>
+        isRecord(check) &&
+        typeof check.field === "string" &&
+        typeof check.issue === "string" &&
+        ["source", "suggestion"].every(
+          (key) => check[key] === undefined || typeof check[key] === "string",
+        ),
+    ) ||
+    !Array.isArray(result.evidence) ||
+    typeof focusText !== "string" ||
+    !isTextList(selected) ||
+    typeof includeInsurance !== "boolean"
+  )
+    return null;
+  return {
+    version: 1,
+    profile,
+    focusText,
+    selected,
+    includeInsurance,
+    result: {
+      profile: result.profile,
+      checks: result.checks,
+      evidence: result.evidence,
+      sourceFingerprint:
+        typeof result.sourceFingerprint === "string"
+          ? result.sourceFingerprint
+          : undefined,
+      message: typeof result.message === "string" ? result.message : undefined,
+    },
+  };
+}
+
 export default function OrganisationPage() {
   const app = useApp();
   const org = app.org;
@@ -112,7 +192,7 @@ export default function OrganisationPage() {
   const [history, setHistory] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [includeInsurance, setIncludeInsurance] = useState(false);
-  const [result, setResult] = useState<AIResult | null>(null);
+  const [result, setResult] = useState<ProfileReviewResult | null>(null);
   const [profile, setProfile] = useState<Profile>({ name: "" });
   const [focusText, setFocusText] = useState("");
   const [checksConfirmed, setChecksConfirmed] = useState(false);
@@ -134,9 +214,27 @@ export default function OrganisationPage() {
   const [newName, setNewName] = useState("");
   const [newFrequency, setNewFrequency] = useState<Frequency>("weekly");
   const [removeId, setRemoveId] = useState<string | null>(null);
+  const [profileDraft, setProfileDraft] = useState<ProfileReviewDraft | null>(
+    null,
+  );
+  const [loadedDraftScope, setLoadedDraftScope] = useState("");
+  const [failedDraftScope, setFailedDraftScope] = useState("");
+  const [draftLoadAttempt, setDraftLoadAttempt] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const wizardInput = useRef<HTMLInputElement>(null);
   const profileReview = useRef<ProfileReviewCheckpoint | null>(null);
+  const currentDraft = useRef<ProfileReviewDraft | null>(null);
+  const checkedDraftScope = useRef("");
+  const pendingDraftWrite = useRef<Promise<boolean> | null>(null);
+  const draftOrgId = app.mode === "live" ? org?.id : undefined;
+  const draftActorId = app.user?.id;
+  const draftScope =
+    draftOrgId && draftActorId ? `${draftOrgId}:${draftActorId}` : "";
+  const activeDraftScope = useRef(draftScope);
+  activeDraftScope.current = draftScope;
+  const currentProfileDraft =
+    profileDraft?.scope === draftScope ? profileDraft : null;
+  const loadingProfileDraft = !!draftScope && loadedDraftScope !== draftScope;
 
   useEffect(() => {
     profileReview.current = null;
@@ -144,10 +242,139 @@ export default function OrganisationPage() {
     setWizard(false);
     setGrantSetupOpen(false);
     setError("");
+    setBusy("");
+    setProfileStage(null);
+    setHistory("");
+    setResult(null);
+    setProfile({ name: "" });
     setUploadReport(null);
     setEditingExpiry(null);
     setUploadExpiry("");
   }, [org?.id, app.user?.id]);
+
+  useEffect(() => {
+    if (currentDraft.current?.scope !== draftScope) {
+      currentDraft.current = null;
+      setProfileDraft(null);
+    }
+    if (!draftOrgId || !draftActorId) return;
+    let active = true;
+    void loadSetupReviewDraft(draftOrgId, draftActorId, "profile")
+      .then((stored) => {
+        if (!active) return;
+        if (currentDraft.current?.scope === draftScope && stored) return;
+        const review = stored && readPendingProfileReview(stored.data);
+        if (stored && !review) {
+          setFailedDraftScope(draftScope);
+          return;
+        }
+        checkedDraftScope.current = draftScope;
+        setFailedDraftScope("");
+        if (!review) return;
+        const entry: ProfileReviewDraft = {
+          scope: draftScope,
+          review,
+          status: "saved",
+        };
+        currentDraft.current = entry;
+        setProfileDraft(entry);
+      })
+      .catch(() => {
+        if (active) setFailedDraftScope(draftScope);
+      })
+      .finally(() => {
+        if (active) setLoadedDraftScope(draftScope);
+      });
+    return () => {
+      active = false;
+    };
+  }, [draftActorId, draftLoadAttempt, draftOrgId, draftScope]);
+
+  const persistProfileDraft = useCallback(
+    (review: PendingProfileReview) => {
+      if (!draftOrgId || !draftActorId) return Promise.resolve(false);
+      const entry: ProfileReviewDraft = {
+        scope: draftScope,
+        review,
+        status: "saving",
+      };
+      const inScope = () => activeDraftScope.current === draftScope;
+      if (inScope()) {
+        currentDraft.current = entry;
+        setProfileDraft(entry);
+      }
+      async function writeDraft() {
+        if (!draftOrgId || !draftActorId) return false;
+        if (checkedDraftScope.current !== draftScope) {
+          const stored = await loadSetupReviewDraft(
+            draftOrgId,
+            draftActorId,
+            "profile",
+          );
+          // Preserve a prior review if this wizard opened while storage was unreachable.
+          if (stored) return false;
+          if (inScope()) {
+            checkedDraftScope.current = draftScope;
+            setFailedDraftScope("");
+          }
+        }
+        await saveSetupReviewDraft(draftOrgId, draftActorId, "profile", review);
+        return true;
+      }
+      const finished = writeDraft()
+        .catch(() => false)
+        .then((saved) => {
+          if (inScope() && currentDraft.current === entry) {
+            const next: ProfileReviewDraft = {
+              ...entry,
+              status: saved ? "saved" : "unsaved",
+            };
+            currentDraft.current = next;
+            setProfileDraft(next);
+          }
+          return saved;
+        });
+      pendingDraftWrite.current = finished;
+      return finished;
+    },
+    [draftActorId, draftOrgId, draftScope],
+  );
+
+  useEffect(() => {
+    if (!wizard || step !== "review" || !result || !draftScope || busy) return;
+    const previous =
+      currentDraft.current?.scope === draftScope
+        ? currentDraft.current.review
+        : null;
+    if (
+      previous?.profile === profile &&
+      previous?.focusText === focusText &&
+      previous?.result === result
+    )
+      return;
+    const timer = window.setTimeout(() => {
+      void persistProfileDraft({
+        version: 1,
+        profile,
+        focusText,
+        result,
+        selected,
+        includeInsurance,
+      });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    busy,
+    draftScope,
+    focusText,
+    includeInsurance,
+    persistProfileDraft,
+    profile,
+    result,
+    selected,
+    step,
+    wizard,
+  ]);
   const publicDocuments = app.data.documents.filter((document) =>
     ["registration", "acnc", "other"].includes(document.category),
   );
@@ -192,9 +419,22 @@ export default function OrganisationPage() {
   function openWizard() {
     profileReview.current = null;
     setWizard(true);
-    setStep("sources");
     setHistory("");
     setError("");
+    setProfileStage(null);
+    setChecksConfirmed(false);
+    setApproveConfirmed(false);
+    const draft = currentProfileDraft?.review;
+    if (draft) {
+      setStep("review");
+      setResult(draft.result);
+      setProfile(draft.profile);
+      setFocusText(draft.focusText);
+      setSelected(draft.selected);
+      setIncludeInsurance(draft.includeInsurance);
+      return;
+    }
+    setStep("sources");
     setResult(null);
     setIncludeInsurance(false);
     let selectedSize = 0;
@@ -213,15 +453,50 @@ export default function OrganisationPage() {
         })
         .map((document) => document.id),
     );
-    setProfileStage(null);
     setProfile(profileValues(org?.profile ?? { name: org?.name ?? "" }));
     setFocusText((org?.focus_areas ?? []).join(", "));
-    setChecksConfirmed(false);
-    setApproveConfirmed(false);
   }
   function closeWizard() {
     profileReview.current = null;
     setWizard(false);
+  }
+  async function saveCurrentProfileDraft() {
+    if (!result || !draftScope) return false;
+    const current = currentDraft.current;
+    if (
+      current?.scope === draftScope &&
+      current.review.profile === profile &&
+      current.review.focusText === focusText &&
+      current.review.result === result &&
+      current.status !== "unsaved"
+    ) {
+      if (current.status === "saved") return true;
+      return (await pendingDraftWrite.current) ?? false;
+    }
+    return persistProfileDraft({
+      version: 1,
+      profile,
+      focusText,
+      result,
+      selected,
+      includeInsurance,
+    });
+  }
+  function leaveWizard() {
+    if (step === "review" && result) void saveCurrentProfileDraft();
+    closeWizard();
+  }
+  async function saveProfileDraftAndClose() {
+    setBusy("save-draft");
+    try {
+      if (
+        (await saveCurrentProfileDraft()) &&
+        activeDraftScope.current === draftScope
+      )
+        closeWizard();
+    } finally {
+      if (activeDraftScope.current === draftScope) setBusy("");
+    }
   }
   function changeProfileSources() {
     if (profileReview.current) setError("");
@@ -336,6 +611,7 @@ export default function OrganisationPage() {
         (stage) => setProfileStage(stage),
         profileReview,
       );
+      if (activeDraftScope.current !== draftScope) return;
       if (!draft.profile)
         throw new Error("A profile draft was not returned. Please try again.");
       let nextProfile = draft.profile;
@@ -366,8 +642,10 @@ export default function OrganisationPage() {
           );
         }
       }
-      setResult({
-        ...draft,
+      const completedReview: ProfileReviewResult = {
+        profile: draft.profile,
+        sourceFingerprint: draft.sourceFingerprint,
+        message: draft.message,
         checks: [
           ...new Map(
             [...(draft.checks ?? []), ...preservedChecks].map((check) => [
@@ -387,17 +665,31 @@ export default function OrganisationPage() {
             ].map((item) => [JSON.stringify(item), item]),
           ).values(),
         ],
-      });
-      setProfile(profileValues(nextProfile));
-      setFocusText((nextProfile.focus_areas ?? []).join(", "));
+      };
+      const editableProfile = profileValues(nextProfile);
+      delete editableProfile.grant_setup;
+      const nextFocusText = (editableProfile.focus_areas ?? []).join(", ");
+      setResult(completedReview);
+      setProfile(editableProfile);
+      setFocusText(nextFocusText);
       setChecksConfirmed(false);
       setApproveConfirmed(false);
       setStep("review");
+      void persistProfileDraft({
+        version: 1,
+        profile: editableProfile,
+        focusText: nextFocusText,
+        result: completedReview,
+        selected,
+        includeInsurance,
+      });
     } catch (e) {
-      setError(errorMessage(e));
+      if (activeDraftScope.current === draftScope) setError(errorMessage(e));
     } finally {
-      setBusy("");
-      setProfileStage(null);
+      if (activeDraftScope.current === draftScope) {
+        setBusy("");
+        setProfileStage(null);
+      }
     }
   }
   async function approveProfile() {
@@ -417,7 +709,11 @@ export default function OrganisationPage() {
     setError("");
     try {
       const reviewedProfile = {
+        ...org?.profile,
         ...profile,
+        ...(org?.profile.grant_setup !== undefined
+          ? { grant_setup: org.profile.grant_setup }
+          : {}),
         beneficiaries: profile.beneficiaries
           ?.map((value) => value.trim())
           .filter(Boolean),
@@ -443,12 +739,29 @@ export default function OrganisationPage() {
         verification_status: "approved",
       };
       await app.updateOrg(patch);
-      closeWizard();
-      app.notify("Organisation details approved and saved.");
+      if (activeDraftScope.current !== draftScope) return;
+      let cleanupFailed = false;
+      if (result && draftOrgId && draftActorId) {
+        currentDraft.current = null;
+        setProfileDraft(null);
+        try {
+          await removeSetupReviewDraft(draftOrgId, draftActorId, "profile");
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (activeDraftScope.current === draftScope) {
+        closeWizard();
+        app.notify("Organisation details approved and saved.");
+        if (cleanupFailed)
+          setError(
+            "Your details were approved. The old profile draft could not be cleared.",
+          );
+      }
     } catch (e) {
-      setError(errorMessage(e));
+      if (activeDraftScope.current === draftScope) setError(errorMessage(e));
     } finally {
-      setBusy("");
+      if (activeDraftScope.current === draftScope) setBusy("");
     }
   }
   async function saveFrequency() {
@@ -623,9 +936,15 @@ export default function OrganisationPage() {
                   <Sparkles size={18} />
                   Set up for grants
                 </button>
-                <button className="button secondary" onClick={openWizard}>
+                <button
+                  className="button secondary"
+                  disabled={loadingProfileDraft}
+                  onClick={openWizard}
+                >
                   <Sparkles size={18} />
-                  Update with AI
+                  {currentProfileDraft
+                    ? "Resume profile draft"
+                    : "Update with AI"}
                 </button>
                 <button
                   className="button secondary"
@@ -652,6 +971,21 @@ export default function OrganisationPage() {
                   Edit details
                 </button>
               </div>
+              {failedDraftScope === draftScope && !!draftScope && (
+                <p className="small muted">
+                  Couldn’t check for a saved profile draft.{" "}
+                  <button
+                    className="button secondary"
+                    onClick={() => {
+                      setFailedDraftScope("");
+                      setLoadedDraftScope("");
+                      setDraftLoadAttempt((attempt) => attempt + 1);
+                    }}
+                  >
+                    Retry loading profile draft
+                  </button>
+                </p>
+              )}
             </section>
             <div className="stack">
               <section className="card card-soft">
@@ -942,7 +1276,7 @@ export default function OrganisationPage() {
               ? "Let’s get to know your organisation"
               : "Review your organisation details"
           }
-          onClose={() => !busy && closeWizard()}
+          onClose={() => !busy && leaveWizard()}
           wide
         >
           <div className="wizard-progress">
@@ -1143,6 +1477,17 @@ export default function OrganisationPage() {
                   </div>
                 </div>
               )}
+              {result && currentProfileDraft && (
+                <p className="small muted" role="status">
+                  {currentProfileDraft.status === "unsaved"
+                    ? "This draft couldn’t be saved for later. Your edits are still here. Try saving again before leaving this page."
+                    : currentProfileDraft.status === "saving" ||
+                        currentProfileDraft.review.profile !== profile ||
+                        currentProfileDraft.review.focusText !== focusText
+                      ? "Saving your draft…"
+                      : "Draft saved. You can return to finish reviewing before you approve it."}
+                </p>
+              )}
               {reviewChecks.length > 0 && (
                 <section className="review-differences">
                   <h3>These details need your attention</h3>
@@ -1286,10 +1631,28 @@ export default function OrganisationPage() {
                 <button
                   className="button secondary"
                   disabled={!!busy}
-                  onClick={() => (result ? setStep("sources") : closeWizard())}
+                  onClick={() => {
+                    if (result) {
+                      void saveCurrentProfileDraft();
+                      setStep("sources");
+                    } else closeWizard();
+                  }}
                 >
                   {result ? "Back to sources" : "Cancel"}
                 </button>
+                {result && draftScope && (
+                  <button
+                    className="button secondary"
+                    disabled={!!busy}
+                    onClick={saveProfileDraftAndClose}
+                  >
+                    {busy === "save-draft" ? (
+                      <Busy label="Saving draft…" />
+                    ) : (
+                      "Save draft and close"
+                    )}
+                  </button>
+                )}
                 <button
                   className="button primary"
                   disabled={
