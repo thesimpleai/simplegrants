@@ -7,6 +7,7 @@ export class AIExecutionError extends Error {
     public kind: AIFailure,
     public reason?: "MODEL_OUTPUT_LIMIT" | "EMPTY_TEXT" | "INVALID_JSON",
     public usage?: {
+      inputTokens?: number;
       outputTokens?: number;
       thinkingTokens?: number;
       tokenLimit?: number;
@@ -321,6 +322,15 @@ export function aiFailureResponse(
     message =
       "AI is not fully configured. Ask an administrator to check the server settings.";
   } else if (
+    error instanceof AIExecutionError &&
+    error.reason === "MODEL_OUTPUT_LIMIT"
+  ) {
+    code = "SG_AI_OUTPUT_LIMIT";
+    status = 502;
+    message = stage.startsWith("profile_")
+      ? "The AI reached its response length limit while preparing your profile. Try again with fewer sources or paste the relevant excerpts."
+      : "The AI reached its response length limit before finishing this step. Try again with a narrower request or more focused source material.";
+  } else if (
     (error instanceof AIExecutionError && error.kind === "response") ||
     (error instanceof Error && error.name === "ZodError")
   ) {
@@ -354,9 +364,12 @@ export function aiFailureResponse(
               key === "modelVersion"
                 ? typeof value === "string" &&
                   /^gemini-[a-z0-9.-]{1,100}$/i.test(value)
-                : ["outputTokens", "thinkingTokens", "tokenLimit"].includes(
-                    key,
-                  ) &&
+                : [
+                    "inputTokens",
+                    "outputTokens",
+                    "thinkingTokens",
+                    "tokenLimit",
+                  ].includes(key) &&
                   typeof value === "number" &&
                   Number.isInteger(value) &&
                   value >= 0 &&

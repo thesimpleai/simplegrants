@@ -751,6 +751,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           "Your AI assistant is temporarily unavailable. Please try again.",
         SG_AI_NETWORK:
           "We couldn’t connect to your AI assistant. Check your connection and try again.",
+        SG_AI_OUTPUT_LIMIT:
+          original.action === "profile"
+            ? "The AI reached its response length limit while preparing your profile. Try again with fewer sources or paste the relevant excerpts."
+            : "The AI reached its response length limit before finishing this step. Try again with a narrower request or more focused source material.",
         SG_AI_RESPONSE:
           "We couldn’t read a response from your AI assistant. Please try again.",
       };
