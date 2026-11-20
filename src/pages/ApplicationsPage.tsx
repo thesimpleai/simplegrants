@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Check,
@@ -21,6 +21,10 @@ import {
   formatDraft,
 } from "../components/ui";
 import type { Application } from "../types";
+import {
+  isApplicationResearch,
+  type ApplicationResearch,
+} from "../lib/application-research";
 import { draftEvidenceBlockers } from "../lib/grant-requirements";
 import {
   MAX_AI_DOCUMENTS,
@@ -54,6 +58,9 @@ export default function ApplicationsPage({
     }),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [research, setResearch] = useState<ApplicationResearch | null>(null);
+  const [researching, setResearching] = useState(false);
+  const [sourcesConfirmed, setSourcesConfirmed] = useState(false);
   const application = app.data.applications.find((a) => a.id === selected),
     opportunity = app.data.opportunities.find(
       (o) => o.id === application?.opportunity_id,
@@ -71,7 +78,11 @@ export default function ApplicationsPage({
       app.data.opportunities.find((o) => o.id === a.opportunity_id)
         ?.guidelines_text ?? "",
     );
-    setDraft(formatDraft(a.draft));
+    setDraft(
+      typeof a.draft.application_text === "string"
+        ? a.draft.application_text
+        : formatDraft(a.draft),
+    );
     setStatus(a.status);
     setReference(a.grant_reference ?? "");
     setSourceDocuments(
@@ -103,6 +114,73 @@ export default function ApplicationsPage({
       ),
     );
     setError("");
+    setResearch(
+      isApplicationResearch(a.project_details.application_research)
+        ? a.project_details.application_research
+        : null,
+    );
+    setSourcesConfirmed(a.project_details.research_sources_confirmed === true);
+  }
+  useEffect(() => {
+    if (!app.org) return;
+    const key = `simple-grants-open-application:${app.user?.id ?? "demo"}:${app.org.id}`;
+    let pending: string | null = null;
+    try {
+      pending = sessionStorage.getItem(key);
+    } catch {
+      return;
+    }
+    const saved = app.data.applications.find(
+      (item) => item.id === pending && item.org_id === app.org?.id,
+    );
+    if (!saved) return;
+    sessionStorage.removeItem(key);
+    open(saved);
+    if (
+      app.mode === "live" &&
+      ["draft", "review"].includes(saved.status) &&
+      !isApplicationResearch(saved.project_details.application_research)
+    )
+      void prepareSources(saved);
+  }, [app.org?.id, app.user?.id, app.data.applications]);
+  async function prepareSources(target = application) {
+    if (!target) return;
+    setBusy(true);
+    setResearching(true);
+    setError("");
+    try {
+      const result = await app.runAI({
+        action: "prepare-application",
+        applicationId: target.id,
+        opportunityId: target.opportunity_id,
+      });
+      if (!result.applicationResearch)
+        throw new Error(
+          "The source research could not be read. Use the funder’s current guidelines below.",
+        );
+      setResearch(result.applicationResearch);
+      setSourcesConfirmed(false);
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setBusy(false);
+      setResearching(false);
+    }
+  }
+  function useResearch() {
+    if (!research) return;
+    setGuidelines((current) =>
+      current.trim() ? current : research.guidelines_excerpt,
+    );
+    setDetails((current) => ({
+      ...current,
+      application_questions: current.application_questions.trim()
+        ? current.application_questions
+        : research.application_questions,
+    }));
+    app.notify(
+      "Available source details added to empty fields. Check them against the complete current official documents.",
+    );
   }
   async function save() {
     if (!application) return;
@@ -121,6 +199,12 @@ export default function ApplicationsPage({
         ...application.project_details,
         ...details,
         source_document_ids: sourceDocuments,
+        ...(research
+          ? {
+              application_research: research,
+              research_sources_confirmed: sourcesConfirmed,
+            }
+          : {}),
         ...(status === "submitted"
           ? {
               submission_confirmation: {
@@ -219,7 +303,8 @@ export default function ApplicationsPage({
     details.summary.trim() &&
     details.application_questions.trim() &&
     evidenceBlockers.length === 0 &&
-    !sourcesTooLarge,
+    !sourcesTooLarge &&
+    (!research || sourcesConfirmed),
   );
   return (
     <>
@@ -327,6 +412,178 @@ export default function ApplicationsPage({
               <FileText size={20} />
               <p>Let’s collect what we need for a useful, accurate draft.</p>
             </div>
+            <section
+              className="card-soft stack"
+              aria-label="Application assistant"
+            >
+              <h3>Start with the funder’s current information</h3>
+              <p>
+                Your assistant can research this grant, check what is already
+                known about your organisation, and highlight what is still
+                needed for this project.
+              </p>
+              {app.org?.verification_status === "approved" ? (
+                <>
+                  <p className="small muted">
+                    Your approved organisation profile and the evidence you
+                    select below are available when preparing this application.
+                    You do not need to re-enter your organisation’s background.
+                  </p>
+                  <details>
+                    <summary>
+                      Organisation information already available
+                    </summary>
+                    <p>
+                      <strong>{app.org.name}</strong>
+                    </p>
+                    <p>
+                      {app.org.profile.mission ||
+                        app.org.profile.description ||
+                        app.org.description}
+                    </p>
+                    {app.org.profile.beneficiaries?.length ? (
+                      <p>
+                        People served:{" "}
+                        {app.org.profile.beneficiaries.join(", ")}
+                      </p>
+                    ) : null}
+                    {app.org.focus_areas.length ? (
+                      <p>Focus areas: {app.org.focus_areas.join(", ")}</p>
+                    ) : null}
+                    <p className="small muted">
+                      Approved history, programs, registration and insurance
+                      details are also available where relevant to the
+                      application questions.
+                    </p>
+                  </details>
+                </>
+              ) : (
+                <Notice>
+                  Review and approve your organisation profile in My
+                  organisation before preparing a draft.
+                </Notice>
+              )}
+              <button
+                className="button secondary align-start"
+                disabled={
+                  busy ||
+                  app.mode !== "live" ||
+                  !["draft", "review"].includes(application.status)
+                }
+                onClick={() => prepareSources()}
+              >
+                {researching ? (
+                  <Busy label="Reading official grant sources…" />
+                ) : (
+                  <>
+                    <Sparkles size={17} />
+                    {research
+                      ? "Refresh source research"
+                      : "Research this grant with AI"}
+                  </>
+                )}
+              </button>
+              {research && (
+                <>
+                  <p>{research.summary}</p>
+                  {(
+                    [
+                      ["Eligibility to check", research.eligibility],
+                      ["Assessment criteria", research.criteria],
+                      ["Dates to confirm", research.deadlines],
+                      ["Required attachments", research.required_attachments],
+                      [
+                        "Still needed for this project",
+                        research.unresolved_questions,
+                      ],
+                    ] as const
+                  )
+                    .filter(([, items]) => items.length)
+                    .map(([heading, items]) => (
+                      <div key={heading}>
+                        <strong>{heading}</strong>
+                        <ul>
+                          {items.map((item, index) => (
+                            <li key={index}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  {(research.guidelines_excerpt ||
+                    research.application_questions) && (
+                    <details>
+                      <summary>
+                        Source excerpts and application questions
+                      </summary>
+                      {research.guidelines_excerpt && (
+                        <p style={{ whiteSpace: "pre-wrap" }}>
+                          {research.guidelines_excerpt}
+                        </p>
+                      )}
+                      {research.application_questions && (
+                        <p style={{ whiteSpace: "pre-wrap" }}>
+                          {research.application_questions}
+                        </p>
+                      )}
+                      <button
+                        className="button secondary"
+                        disabled={busy}
+                        onClick={useResearch}
+                      >
+                        Add source details to empty fields
+                      </button>
+                    </details>
+                  )}
+                  {research.sources.map((source) => (
+                    <ExternalLink key={source.uri} href={source.uri}>
+                      {source.title}
+                    </ExternalLink>
+                  ))}
+                </>
+              )}
+              {(research
+                ? research.official_source_url
+                : opportunity?.source_url) && (
+                <ExternalLink
+                  href={
+                    research
+                      ? research.official_source_url
+                      : opportunity!.source_url
+                  }
+                >
+                  {research
+                    ? "Open the funder’s guidelines or application portal"
+                    : "Open the saved grant source and check the official guidelines"}
+                </ExternalLink>
+              )}
+              <p className="small muted">
+                Download the complete current guidelines and application form
+                from the funder. Upload them to My organisation using the
+                Guidelines type, or paste the full text below. If a portal
+                requires sign-in, open it yourself and copy the actual questions
+                and word limits. Research excerpts may omit mandatory
+                conditions.
+              </p>
+              {research && (
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={sourcesConfirmed}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setSourcesConfirmed(event.target.checked)
+                    }
+                  />{" "}
+                  I checked the complete current official guidelines and
+                  application questions, including the grant round, eligibility,
+                  deadlines and required attachments.
+                </label>
+              )}
+              <p className="small muted">
+                Save changes to resume from these source notes later. Your
+                existing answers and draft are preserved while research runs.
+              </p>
+            </section>
             <div className="requirements">
               <span
                 className={
@@ -352,7 +609,10 @@ export default function ApplicationsPage({
               <textarea
                 rows={5}
                 value={guidelines}
-                onChange={(e) => setGuidelines(e.target.value)}
+                onChange={(e) => {
+                  setGuidelines(e.target.value);
+                  if (research) setSourcesConfirmed(false);
+                }}
                 placeholder="Paste the funder’s current guidelines, eligibility rules and evidence requirements…"
               />
             </label>
@@ -361,12 +621,13 @@ export default function ApplicationsPage({
               <textarea
                 rows={4}
                 value={details.application_questions}
-                onChange={(e) =>
+                onChange={(e) => {
                   setDetails((d) => ({
                     ...d,
                     application_questions: e.target.value,
-                  }))
-                }
+                  }));
+                  if (research) setSourcesConfirmed(false);
+                }}
                 placeholder="Paste the actual questions from the application form…"
               />
             </label>

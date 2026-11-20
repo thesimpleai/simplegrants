@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { ArrowRight, Leaf, ShieldCheck } from "lucide-react";
+import { ArrowRight, ShieldCheck } from "lucide-react";
+import Brand from "./Brand";
 import { supabase } from "../lib/supabase";
 import { safeAuthReturnPath } from "../lib/auth-links";
 import { Busy, Notice } from "./ui";
@@ -50,11 +51,7 @@ export default function AuthConfirm({
     <div className="login-page">
       <div className="login-story">
         <a className="brand" href="/" aria-label="Simple Grants home">
-          <span className="brand-symbol">
-            <Leaf size={24} />
-          </span>
-          simple<span>grant</span>
-          <span className="brand-period">.</span>
+          <Brand />
         </a>
         <div>
           <span className="hero-eyebrow">GOOD WORK DESERVES GOOD SUPPORT</span>

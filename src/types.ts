@@ -1,4 +1,36 @@
+import type { ApplicationResearch } from "./lib/application-research";
 export type Frequency = "weekly" | "monthly" | "never";
+export interface ProfileMilestone {
+  title: string;
+  date?: string;
+  details?: string;
+  source?: string;
+}
+export interface ProfileActivity {
+  name: string;
+  description?: string;
+  status?: "current" | "historical" | "planned" | "unspecified";
+  start_date?: string;
+  end_date?: string;
+  outcomes?: string;
+  source?: string;
+}
+export interface ProfileInsurance {
+  insurer: string;
+  policy_type: string;
+  policy_number?: string;
+  coverage?: string;
+  coverage_amount?: string;
+  starts_on?: string;
+  expires_on?: string;
+  issued_on?: string;
+  source?: string;
+}
+export interface ProfileFact {
+  label: string;
+  value: string;
+  source?: string;
+}
 export type Profile = {
   name: string;
   abn?: string;
@@ -9,6 +41,21 @@ export type Profile = {
   website?: string;
   legal_name?: string;
   acnc_registered?: boolean;
+  mission?: string;
+  beneficiaries?: string[];
+  service_locations?: string[];
+  history?: string;
+  milestones?: ProfileMilestone[];
+  activities?: ProfileActivity[];
+  founded_on?: string;
+  registration_date?: string;
+  registration_authority?: string;
+  registration_number?: string;
+  charity_registration_date?: string;
+  charity_registration_number?: string;
+  certificate_issue_date?: string;
+  insurance_policies?: ProfileInsurance[];
+  other_facts?: ProfileFact[];
   [key: string]: unknown;
 };
 export interface Organisation {
@@ -149,6 +196,7 @@ export interface DraftRequirements {
   })[];
 }
 export interface AIResult {
+  applicationResearch?: ApplicationResearch;
   searchDraft?: SearchDraft;
   draftRequirements?: DraftRequirements;
   stageIssuedAt?: number;

@@ -2,8 +2,12 @@ import type {
   DocumentRecord,
   Opportunity,
   Organisation,
+  Profile,
 } from "../../../src/types";
-import { draftEvidenceBlockers } from "../../../src/lib/grant-requirements";
+import {
+  documentExpiryStatus,
+  draftEvidenceBlockers,
+} from "../../../src/lib/grant-requirements";
 
 export class HttpError extends Error {
   constructor(
@@ -40,7 +44,7 @@ export function safePublicReply(
   portalUrl: string,
 ) {
   // Deliberately no generative AI, private documents, ledger or original message in email replies.
-  return `Thanks for your email to Simple Grant. We have received it for ${org.name}${org.abn ? ` (ABN ${org.abn})` : ""}. An authorised member can review the message and any attachments securely in the portal: ${portalUrl}\n\nFor questions about documents, finances, applications or project progress, please sign in. Email attachments are unverified until reviewed.`;
+  return `Thanks for your email to Simple Grants. We have received it for ${org.name}${org.abn ? ` (ABN ${org.abn})` : ""}. An authorised member can review the message and any attachments securely in the portal: ${portalUrl}\n\nFor questions about documents, finances, applications or project progress, please sign in. Email attachments are unverified until reviewed.`;
 }
 export type PublicEmailIntent = "org_name" | "abn" | "grants" | "help";
 export function publicEmailAnswer(
@@ -53,7 +57,7 @@ export function publicEmailAnswer(
   portalUrl: string,
 ) {
   if (intent === "org_name")
-    return `The organisation name saved in Simple Grant is ${org.name}. Review public organisation details in your secure portal: ${portalUrl}`;
+    return `The organisation name saved in Simple Grants is ${org.name}. Review public organisation details in your secure portal: ${portalUrl}`;
   if (intent === "abn")
     return org.abn
       ? `The ABN saved for ${org.name} is ${org.abn}. Confirm its current registration on the Australian Business Register. Portal: ${portalUrl}`
@@ -129,7 +133,8 @@ export function draftBlockers(
             ["audit", "audit_report", "financial_statement"].includes(
               d.category,
             ))) &&
-        (!d.expires_on || new Date(`${d.expires_on}T23:59:59Z`) >= now),
+        (!d.expires_on ||
+          documentExpiryStatus(d.expires_on, now) === "current"),
     );
     if (!found)
       blockers.push(
@@ -233,6 +238,36 @@ export function stripSensitive<T>(value: T): T {
         .map(([key, val]) => [key, stripSensitive(val)]),
     ) as T;
   return value;
+}
+/** Candidate quotes and unresolved review findings remain provenance for a
+ * human. They must never be relabelled as approved grant-application facts. */
+export function approvedProfileFacts(
+  profile: Profile,
+): Record<string, unknown> {
+  return stripSensitive(
+    Object.fromEntries(
+      Object.entries(profile).filter(
+        ([field]) => !["source_evidence", "review_notes"].includes(field),
+      ),
+    ),
+  );
+}
+/** Prior AI research and workflow confirmations are not project evidence. */
+export function projectFactsForAI(
+  project: Record<string, unknown>,
+): Record<string, unknown> {
+  return stripSensitive(
+    Object.fromEntries(
+      Object.entries(project).filter(
+        ([field]) =>
+          ![
+            "application_research",
+            "research_sources_confirmed",
+            "submission_confirmation",
+          ].includes(field),
+      ),
+    ),
+  );
 }
 export function errorResponse(error: unknown) {
   if (error instanceof HttpError)

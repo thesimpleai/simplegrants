@@ -39,7 +39,7 @@ async function mockWorkspace(page: Page, documents: DocumentRecord[] = []) {
   await page.route("**/src/lib/supabase.ts*", (route) =>
     route.fulfill({
       contentType: "application/javascript",
-      body: `export const configured=true;export const supabase={auth:{getSession:async()=>{const user=await(await fetch('/polish-user')).json();return {data:{session:{user,access_token:'test-access'}},error:null}},onAuthStateChange:()=>({data:{subscription:{unsubscribe(){}}}})},from:table=>({select:()=>({order:async()=>(await fetch('/polish-orgs')).json(),eq:async(field,id)=>(await fetch('/polish-records?table='+table+'&org='+id)).json()}),insert:async data=>(await fetch('/polish-insert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json(),update:data=>({eq:async(field,id)=>(await fetch('/polish-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,...data})})).json()})}),storage:{from:()=>({upload:async(path,file,options)=>(await fetch('/polish-upload?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':options.contentType},body:file})).json(),remove:async()=>({error:null})})}};`,
+      body: `export const configured=true;export const supabase={auth:{getSession:async()=>{const user=await(await fetch('/polish-user')).json();return {data:{session:{user,access_token:'test-access'}},error:null}},onAuthStateChange:()=>({data:{subscription:{unsubscribe(){}}}})},from:table=>({select:()=>({order:async()=>(await fetch('/polish-orgs')).json(),eq:async(field,id)=>(await fetch('/polish-records?table='+table+'&org='+id)).json()}),insert:async data=>(await fetch('/polish-insert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json(),update:data=>({eq:(field,id)=>({select:()=>({maybeSingle:async()=>(await fetch('/polish-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,...data})})).json()})})})}),storage:{from:()=>({upload:async(path,file,options)=>(await fetch('/polish-upload?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':options.contentType},body:file})).json(),remove:async()=>({error:null})})}};`,
     }),
   );
   await page.route("**/src/lib/app-context.tsx*", async (route) => {
@@ -102,7 +102,12 @@ async function mockWorkspace(page: Page, documents: DocumentRecord[] = []) {
     state.orgs = state.orgs.map((item) =>
       item.id === body.id ? { ...item, ...body } : item,
     );
-    return route.fulfill({ json: { error: null } });
+    return route.fulfill({
+      json: {
+        data: state.orgs.find((item) => item.id === body.id) ?? null,
+        error: null,
+      },
+    });
   });
   return state;
 }

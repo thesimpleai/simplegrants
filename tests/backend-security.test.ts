@@ -115,6 +115,38 @@ describe("scheduled notifications", () => {
 });
 
 describe("public email and link boundaries", () => {
+  it.each(["org_name", "abn", "grants", "help"] as const)(
+    "keeps expanded private profile evidence out of %s replies",
+    (intent) => {
+      const privateOrg = {
+        ...org,
+        profile: {
+          name: org.name,
+          insurance_policies: [
+            {
+              insurer: "PRIVATE-INSURER",
+              policy_type: "Liability",
+              policy_number: "PRIVATE-POLICY",
+              source: "PRIVATE-DOCUMENT",
+            },
+          ],
+          source_evidence: [{ quote: "PRIVATE-EVIDENCE" }],
+          history: "PRIVATE-HISTORY",
+        },
+      } as Organisation;
+      const reply = publicEmailAnswer(
+        intent,
+        privateOrg,
+        [],
+        "https://example.com/portal",
+      );
+      const acknowledgement = safePublicReply(
+        privateOrg,
+        "https://example.com/portal",
+      );
+      expect(`${reply} ${acknowledgement}`).not.toContain("PRIVATE-");
+    },
+  );
   it("includes only explicitly supplied public organisation fields in acknowledgements", () => {
     const text = safePublicReply(
       {

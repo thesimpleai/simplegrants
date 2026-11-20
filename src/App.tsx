@@ -31,6 +31,7 @@ import OrganisationPage from "./pages/OrganisationPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import InboxPage from "./pages/InboxPage";
 import { Busy, Modal, Notice, errorMessage } from "./components/ui";
+import Brand from "./components/Brand";
 import type { Frequency } from "./types";
 const navigation = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -174,12 +175,8 @@ export default function App() {
     return (
       <div className="login-page">
         <div className="login-story">
-          <a className="brand" href="/">
-            <span className="brand-symbol">
-              <Leaf size={24} />
-            </span>
-            simple<span>grant</span>
-            <span className="brand-period">.</span>
+          <a className="brand" href="/" aria-label="Simple Grants home">
+            <Brand />
           </a>
           <div>
             <span className="hero-eyebrow">
@@ -201,7 +198,7 @@ export default function App() {
           <small>Made for Australian community organisations.</small>
         </div>
         <main className="login-form">
-          <span className="eyebrow">WELCOME TO SIMPLE GRANT</span>
+          <span className="eyebrow">WELCOME TO SIMPLE GRANTS</span>
           {app.connectionError ? (
             <div className="stack">
               <WorkspaceConnectionIssue
@@ -302,16 +299,13 @@ export default function App() {
         <a
           className="brand"
           href="?view=overview"
+          aria-label="Simple Grants home"
           onClick={(e) => {
             e.preventDefault();
             navigate("overview");
           }}
         >
-          <span className="brand-symbol">
-            <Leaf size={23} />
-          </span>
-          simple<span>grant</span>
-          <span className="brand-period">.</span>
+          <Brand />
         </a>
         <div className="organisation-switcher" ref={pickerRef}>
           <button
@@ -549,7 +543,7 @@ export default function App() {
             <span>
               <Leaf size={14} />A little less paperwork. A lot more possibility.
             </span>
-            <span>Simple Grant · Made for community</span>
+            <span>Simple Grants · Made for community</span>
           </footer>
         </main>
       </div>

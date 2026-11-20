@@ -1,0 +1,399 @@
+/* Easy Compliance Brand Guidelines v1.0, adapted for Simple Grants.
+ * Fonts and the original Simple AI mark are served from this site. */
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/fonts/HankenGrotesk-latin.woff") format("woff");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("/fonts/PlusJakartaSans-latin.woff") format("woff");
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-latin.woff") format("woff");
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+:root {
+  --navy: #213047;
+  --sky: #83cbf1;
+  --teal: #0b3a4a;
+  --orange: #f05f40;
+  --steel: #66a5d0;
+  --cloud: #f4f6f8;
+  --ink: #1a2230;
+  --muted: #5b6675;
+  --line: #dce2e8;
+  --forest: var(--teal);
+  --cream: var(--cloud);
+  --sage: #eaf4fa;
+  --ochre: var(--sky);
+  font-family: "Hanken Grotesk", "Segoe UI", Arial, sans-serif;
+  color: var(--ink);
+  background: var(--cloud);
+}
+h1,
+h2,
+h3,
+.page-title,
+.welcome-banner h2,
+.login-story h1,
+.login-form h2,
+.card-heading h2,
+.community-note h2,
+.section-title-row h2,
+.empty-state h3,
+.modal-heading h2,
+.grant-card h2,
+.organisation-profile h2,
+.inbox-address-content h2,
+.project-card h2,
+.project-detail-heading h2,
+.organisation-name {
+  font-family: "Plus Jakarta Sans", "Segoe UI", Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--navy);
+}
+.eyebrow,
+.hero-eyebrow,
+.nav-section-label,
+.today-label,
+.brand-lockup small,
+code,
+kbd {
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+.brand,
+.login-story .brand {
+  gap: 11px;
+  margin-left: 0;
+  margin-right: 0;
+  color: var(--navy);
+  letter-spacing: -0.01em;
+}
+.brand-mark {
+  width: 36px;
+  height: 40px;
+  flex: 0 0 36px;
+  object-fit: contain;
+}
+.brand .brand-lockup {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.brand-lockup strong {
+  font-family: "Plus Jakarta Sans", "Segoe UI", Arial, sans-serif;
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.brand-lockup small {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+.sidebar,
+.topbar,
+.card,
+.modal,
+.login-form {
+  background: #fff;
+}
+.modal-backdrop,
+.sidebar-overlay {
+  background: #21304780;
+}
+.login-story,
+.welcome-banner {
+  background: linear-gradient(130deg, var(--teal), var(--navy));
+  border-color: var(--navy);
+}
+.login-page {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.login-story,
+.login-form {
+  min-width: 0;
+}
+.login-story .brand,
+.login-story h1,
+.welcome-banner h2 {
+  color: #fff;
+}
+.login-story .brand-lockup small,
+.login-story .hero-eyebrow,
+.welcome-banner .hero-eyebrow {
+  color: var(--sky);
+}
+.login-story p,
+.login-story small,
+.welcome-banner p {
+  color: #e1edf5;
+}
+.login-story .brand-lockup strong {
+  font-size: 25px;
+}
+.page-subtitle,
+.muted,
+.community-note p,
+.grant-description,
+.next-step .muted,
+.metric-label,
+.metric-caption,
+.funder-name,
+.profile-completeness,
+.organisation-profile p,
+.profile-facts dt,
+.document-details span,
+.inbox-explainer,
+.inbox-address-content p,
+.message-summary .muted,
+.message-preview,
+.grant-facts .muted,
+.grant-facts > div:nth-child(2) span,
+.card-heading p,
+.stat-card p,
+.project-meta,
+.email-body,
+.assistant-answer,
+.project-detail-heading p,
+.report-callout p,
+.first-organisation p,
+.sidebar-help p,
+.sidebar-footer,
+.main-footer,
+.footnote,
+.today-label,
+.nav-section-label,
+.breadcrumb,
+.topbar-location,
+.login-form > p,
+.document-upload-area p,
+.milestone-row p,
+th,
+td {
+  color: var(--muted);
+}
+.eyebrow,
+.text-link,
+.sidebar-help button,
+.sidebar-help strong,
+.small-leaf,
+.next-step-title,
+.topbar-location strong,
+.mini-grant-bottom strong,
+.segmented button.active,
+.bookmark.is-saved,
+.grant-card-action,
+.inbox-address,
+.community-note h2,
+.community-note .eyebrow,
+.community-note .text-link,
+.document-details strong,
+.organisation-profile h2 {
+  color: var(--teal);
+}
+.org-switch,
+.sidebar-help,
+.community-note,
+.insight-banner,
+.report-callout,
+.segmented,
+.demo-banner {
+  background: var(--cloud);
+  border-color: var(--line);
+}
+.org-monogram,
+.avatar,
+.nav-count,
+.icon-tile,
+.step-icon,
+.sparkle-tile,
+.mini-grant-symbol,
+.funder-icon,
+.funder-icon.ochre,
+.funder-icon.purple,
+.metric-icon,
+.sage,
+.sand,
+.amber,
+.lavender,
+.peach,
+.symbol-1,
+.symbol-2,
+.tag,
+.badge-blue,
+.badge-neutral {
+  background: var(--sage);
+  color: var(--teal);
+  border-color: var(--line);
+}
+.nav-item,
+.ghost,
+.icon-button {
+  color: var(--muted);
+}
+.nav-item.active {
+  color: var(--navy);
+  background: var(--sage);
+}
+.nav-item:hover,
+.org-dropdown button:hover,
+.icon-button:hover,
+.secondary:hover {
+  background: var(--cloud);
+}
+.button,
+.form-field,
+.nav-item {
+  font-size: 14px;
+}
+.form-field {
+  color: var(--navy);
+}
+.button {
+  min-height: 44px;
+  font-weight: 600;
+}
+/* Ink on Signal Orange passes normal-text contrast; white does not. */
+.primary,
+.warm,
+.welcome-banner .warm {
+  background: var(--orange);
+  color: var(--ink);
+  border-color: var(--orange);
+  box-shadow: none;
+}
+.primary:hover,
+.warm:hover {
+  background: #f3755a;
+  color: var(--ink);
+}
+.secondary {
+  background: #fff;
+  border-color: var(--navy);
+  color: var(--navy);
+}
+.status-dot,
+.demo-banner .status-dot,
+.progress-bar {
+  background: var(--steel);
+}
+.progress-track {
+  background: var(--sage);
+}
+.notification-button > span {
+  background: var(--orange);
+}
+.help-sparkle,
+.note-decoration {
+  color: var(--steel);
+}
+.notice {
+  background: #edf6fb;
+  border-color: #bdd8e8;
+  color: var(--teal);
+}
+.notice a,
+.insight-banner p {
+  color: var(--teal);
+}
+.empty-state,
+.document-upload-area,
+.toast,
+.grant-search,
+.segmented button.active {
+  border-color: var(--line);
+  background: #fff;
+}
+.toast,
+.toast > svg {
+  color: var(--teal);
+}
+.modal-heading h2 {
+  font-family: "Plus Jakarta Sans", "Segoe UI", Arial, sans-serif;
+  font-weight: 700;
+}
+input,
+textarea,
+select {
+  border-color: #aeb9c6;
+  color: var(--ink);
+  font-size: 16px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+}
+input:focus,
+textarea:focus,
+select:focus,
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--steel);
+  outline-offset: 3px;
+}
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--teal);
+}
+.hero-illustration [fill="#3c6252"] {
+  fill: #244b61;
+}
+.hero-illustration [fill="#ddc385"],
+.hero-illustration [fill="#afc2a3"],
+.hero-illustration [fill="#d0d7ad"],
+.hero-illustration [fill="#e1d9b0"],
+.hero-illustration [fill="#9fb999"] {
+  fill: var(--sky);
+}
+.hero-illustration [fill="#f6f1e5"] {
+  fill: var(--cloud);
+}
+.hero-illustration [fill="#c6ccb9"],
+.hero-illustration [fill="#d7d9ca"],
+.hero-illustration [fill="#dce5cb"] {
+  fill: #bdd8e8;
+}
+.hero-illustration [stroke="#dce4c8"],
+.hero-illustration [stroke="#b7c69d"] {
+  stroke: var(--sky);
+}
+.hero-illustration [stroke="#507956"] {
+  stroke: var(--teal);
+}
+@media (max-width: 850px) {
+  .login-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .brand-lockup strong {
+    font-size: 19px;
+  }
+  .login-story .brand-lockup strong {
+    font-size: 22px;
+  }
+  .page-title {
+    font-size: 27px;
+  }
+  .login-story h1 {
+    font-size: 34px;
+  }
+  .form-field {
+    font-size: 14px;
+  }
+}

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { DocumentRecord } from "../../src/types";
+import type { DocumentRecord, Organisation, Profile } from "../../src/types";
 
 const orgId = "54ac553a-2aeb-4404-849c-8266b10f8383";
 const secondOrgId = "d8eff44d-c280-4d64-9609-e87af481e154";
@@ -69,15 +69,32 @@ function stageResult(body: Record<string, unknown>) {
 async function prepareDocuments(
   page: Page,
   documents: DocumentRecord[] = initialDocuments,
+  changes: { profile?: Profile; approved?: boolean } = {},
 ) {
   const state = {
     documents: structuredClone(documents),
+    organisations: [orgId, secondOrgId].map((id, index) => ({
+      id,
+      name: index ? "Other Organisation" : "Test Community",
+      abn: null,
+      type: "Charity",
+      state: "VIC",
+      description: "Community support",
+      focus_areas: ["Community"],
+      profile: changes.profile ?? { name: "Test Community" },
+      notification_frequency: "weekly",
+      verification_status: changes.approved ? "approved" : "draft",
+      inbox_alias: "test-inbox",
+      created_at: "2026-01-01T00:00:00Z",
+    })) as Organisation[],
+    updates: [] as Partial<Organisation>[],
     uploads: [] as { path: string; mime: string; bytes: number }[],
     inserts: [] as Record<string, unknown>[],
     ai: [] as Record<string, unknown>[],
     recordRequests: 0,
     open: [] as { path: string; expires: number; options?: unknown }[],
     failUploadAt: 0,
+    failUpdate: false,
   };
   await page.route("**/src/lib/supabase.ts*", (route) =>
     route.fulfill({
@@ -86,31 +103,33 @@ async function prepareDocuments(
 const user=${JSON.stringify(user)};let authCallback;
 window.__changeDocumentUser=next=>authCallback?.(next?'SIGNED_IN':'SIGNED_OUT',next?{user:next,access_token:'test-access'}:null);
 export const supabase={auth:{getSession:async()=>({data:{session:{user,access_token:'test-access'}},error:null}),onAuthStateChange:callback=>{authCallback=callback;return {data:{subscription:{unsubscribe(){if(authCallback===callback)authCallback=null}}}};}},
-from:table=>({select:()=>({order:async()=>(await fetch('/test-document-organizations')).json(),eq:async(field,id)=>(await fetch('/test-document-records?table='+table+'&org='+id)).json()}),insert:async metadata=>(await fetch('/test-document-insert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(metadata)})).json()}),
+from:table=>({select:()=>({order:async()=>(await fetch('/test-document-organizations')).json(),eq:async(field,id)=>(await fetch('/test-document-records?table='+table+'&org='+id)).json()}),insert:async metadata=>(await fetch('/test-document-insert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(metadata)})).json(),update:patch=>({eq:(field,id)=>({select:()=>({maybeSingle:async()=>(await fetch('/test-document-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,patch})})).json()})})})}),
 storage:{from:bucket=>({upload:async(path,file,options)=>{const response=await fetch('/test-document-upload?path='+encodeURIComponent(path),{method:'POST',headers:{'Content-Type':options.contentType},body:file});return response.json();},remove:async()=>({error:null}),createSignedUrl:async(path,expires,options)=>(await fetch('/test-document-open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,expires,options})})).json()})}};`,
     }),
   );
   await page.route("**/test-document-organizations", (route) =>
     route.fulfill({
       json: {
-        data: [orgId, secondOrgId].map((id, index) => ({
-          id,
-          name: index ? "Other Organisation" : "Test Community",
-          abn: null,
-          type: "Charity",
-          state: "VIC",
-          description: "Community support",
-          focus_areas: ["Community"],
-          profile: { name: "Test Community" },
-          notification_frequency: "weekly",
-          verification_status: "draft",
-          inbox_alias: "test-inbox",
-          created_at: "2026-01-01T00:00:00Z",
-        })),
+        data: state.organisations,
         error: null,
       },
     }),
   );
+  await page.route("**/test-document-update", (route) => {
+    const { id, patch } = route.request().postDataJSON();
+    state.updates.push(patch);
+    if (state.failUpdate)
+      return route.fulfill({ json: { data: null, error: null } });
+    state.organisations = state.organisations.map((org) =>
+      org.id === id ? { ...org, ...patch } : org,
+    );
+    return route.fulfill({
+      json: {
+        data: state.organisations.find((org) => org.id === id) ?? null,
+        error: null,
+      },
+    });
+  });
   await page.route("**/test-document-records*", (route) => {
     state.recordRequests++;
     const url = new URL(route.request().url());
@@ -177,6 +196,423 @@ async function openProfile(
     })
     .fill(text);
 }
+
+test("expanded details preserve approved values, require approval and survive a saved profile round trip", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page, initialDocuments, {
+    approved: true,
+    profile: {
+      name: "Test Community",
+      description: "Community support",
+      history: "Reviewed history",
+      legacy_note: "Retain the existing value",
+      source_evidence: [
+        {
+          field: "history",
+          source: "previous-reviewed.pdf",
+          quote: "Reviewed history",
+        },
+      ],
+    },
+  });
+  const expanded = {
+    ...finalResult.profile,
+    mission: "Protect children through education",
+    beneficiaries: ["Children", "Parents"],
+    service_locations: ["Victoria"],
+    history: "New source history",
+    registration_date: "2026-06-19",
+    certificate_issue_date: "2026-06-22",
+    milestones: [
+      { title: "Incorporated", date: "2026", source: "registration.docx" },
+    ],
+    activities: [
+      {
+        name: "Educational workshops",
+        description: "Workshops described in the source",
+        status: "current",
+        source: "history.xlsx",
+      },
+    ],
+    insurance_policies: [
+      {
+        insurer: "Synthetic Insurer",
+        policy_type: "Public liability",
+        policy_number: "SYNTHETIC-POLICY-1",
+        coverage_amount: "$20 million",
+        starts_on: "2026-07-01",
+        expires_on: "2027-07-01",
+        source: "redacted-policy.pdf",
+      },
+    ],
+    other_facts: [
+      {
+        label: "Resource",
+        value: "Educational materials",
+        source: "history.xlsx",
+      },
+    ],
+  };
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    return route.fulfill({
+      json:
+        body.profileStage === "correct"
+          ? { ...finalResult, profile: expanded }
+          : stageResult(body),
+    });
+  });
+  await openProfile(page);
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Organisation name", exact: true }),
+  ).toHaveValue("Test Community");
+  await expect(
+    page.getByRole("textbox", { name: "What your organisation does" }),
+  ).toHaveValue("Community support");
+  await expect(
+    page
+      .getByText("Your previously approved value has been kept.", {
+        exact: false,
+      })
+      .first(),
+  ).toBeVisible();
+  await page.getByText("Purpose, people and places", { exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Mission or purpose" }),
+  ).toHaveValue(expanded.mission);
+  await expect(
+    page.getByRole("textbox", { name: "People and communities you support" }),
+  ).toHaveValue("Children\nParents");
+  await page.getByText("History and milestones", { exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Organisation history", exact: true }),
+  ).toHaveValue("Reviewed history");
+  await page
+    .getByRole("textbox", { name: "Organisation history", exact: true })
+    .fill("Reviewed history with a director’s update");
+  await expect(
+    page.getByRole("textbox", { name: "Milestone date or year" }),
+  ).toHaveValue("2026");
+  await page.getByText("Insurance policies", { exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Policy number", exact: true }),
+  ).toHaveValue("SYNTHETIC-POLICY-1");
+  await page
+    .getByRole("button", { name: "Add insurance policy", exact: true })
+    .click();
+  const secondPolicy = page.getByRole("group", {
+    name: "Policy 2",
+    exact: true,
+  });
+  await secondPolicy
+    .getByRole("textbox", { name: "Insurer", exact: true })
+    .fill("Other Synthetic Insurer");
+  await secondPolicy
+    .getByRole("textbox", { name: "Policy type", exact: true })
+    .fill("Professional indemnity");
+  await secondPolicy
+    .getByRole("textbox", { name: "Policy number", exact: true })
+    .fill("SYNTHETIC-POLICY-2");
+  await expect(
+    page.getByRole("button", { name: "Approve and save", exact: true }),
+  ).toBeDisabled();
+  expect(state.updates).toHaveLength(0);
+  await page
+    .getByRole("checkbox", { name: /I checked these differences/ })
+    .check();
+  await page
+    .getByRole("checkbox", { name: /I have checked these details and approve/ })
+    .check();
+  await page
+    .getByRole("button", { name: "Approve and save", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.updates).toHaveLength(1);
+  expect(state.updates[0].profile).toMatchObject({
+    mission: expanded.mission,
+    history: "Reviewed history with a director’s update",
+    legacy_note: "Retain the existing value",
+    activities: expanded.activities,
+    milestones: expanded.milestones,
+    other_facts: expanded.other_facts,
+    source_evidence: [
+      {
+        field: "history",
+        source: "previous-reviewed.pdf",
+        quote: "Reviewed history",
+      },
+      ...finalResult.evidence,
+    ],
+  });
+  expect(state.updates[0].profile?.insurance_policies).toHaveLength(2);
+  await page.reload();
+  await page.getByRole("button", { name: "Edit details", exact: true }).click();
+  await page.getByText("Insurance policies", { exact: true }).click();
+  await expect(
+    page
+      .getByRole("group", { name: "Policy 2", exact: true })
+      .getByRole("textbox", { name: "Policy number", exact: true }),
+  ).toHaveValue("SYNTHETIC-POLICY-2");
+  await page.getByText("View source references", { exact: true }).click();
+  await expect(page.locator(".evidence-list")).toContainText(
+    "registration.docx",
+  );
+});
+
+test("approved record collections retain reviewed facts and add newly documented activities and policies", async ({
+  page,
+}) => {
+  const existingActivity = {
+    name: "Parent support",
+    description: "Reviewed activity description",
+    status: "current" as const,
+    source: "reviewed-activities.pdf",
+  };
+  const existingPolicy = {
+    insurer: "Reviewed Insurer",
+    policy_type: "Public liability",
+    policy_number: "SYNTHETIC-EXISTING",
+    coverage_amount: "$20 million",
+    expires_on: "2027-12-31",
+    source: "reviewed-policy.pdf",
+  };
+  const addedActivity = {
+    name: "Software resources",
+    description: "Newly documented software activity",
+    status: "current" as const,
+    source: "new-activities.pdf",
+  };
+  const addedPolicy = {
+    insurer: "New Insurer",
+    policy_type: "Professional indemnity",
+    policy_number: "SYNTHETIC-NEW",
+    expires_on: "2027-12-31",
+    source: "new-policy.pdf",
+  };
+  const previousNote = {
+    field: "service_locations",
+    issue: "Confirm the original service area",
+    source: "reviewed-activities.pdf",
+  };
+  const state = await prepareDocuments(page, initialDocuments, {
+    approved: true,
+    profile: {
+      name: "Test Community",
+      description: "Community support",
+      beneficiaries: ["Children"],
+      service_locations: ["VIC"],
+      activities: [existingActivity],
+      insurance_policies: [existingPolicy],
+      review_notes: [previousNote],
+    },
+  });
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    return route.fulfill({
+      json:
+        body.profileStage === "correct"
+          ? {
+              ...finalResult,
+              profile: {
+                name: "Test Community",
+                description: "Community support",
+                focus_areas: ["Community", "Child safeguarding"],
+                beneficiaries: ["children", "Parents"],
+                service_locations: ["VIC", "NSW"],
+                activities: [
+                  {
+                    ...existingActivity,
+                    description: "Proposed replacement description",
+                  },
+                  addedActivity,
+                ],
+                insurance_policies: [
+                  { ...existingPolicy, coverage_amount: "$10 million" },
+                  addedPolicy,
+                ],
+              },
+            }
+          : stageResult(body),
+    });
+  });
+  await openProfile(page);
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  await page.getByText("Activities and programs", { exact: true }).click();
+  await expect(
+    page
+      .getByRole("group", { name: "Activity 1", exact: true })
+      .getByRole("textbox", { name: "Activity description", exact: true }),
+  ).toHaveValue(existingActivity.description);
+  await expect(
+    page
+      .getByRole("group", { name: "Activity 2", exact: true })
+      .getByRole("textbox", { name: "Activity or program name", exact: true }),
+  ).toHaveValue(addedActivity.name);
+  await page.getByText("Insurance policies", { exact: true }).click();
+  await expect(
+    page
+      .getByRole("group", { name: "Policy 1", exact: true })
+      .getByRole("textbox", { name: "Coverage amount", exact: true }),
+  ).toHaveValue(existingPolicy.coverage_amount);
+  await expect(
+    page
+      .getByRole("group", { name: "Policy 2", exact: true })
+      .getByRole("textbox", { name: "Policy number", exact: true }),
+  ).toHaveValue(addedPolicy.policy_number);
+  await page.getByText("Purpose, people and places", { exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "People and communities you support" }),
+  ).toHaveValue("Children\nParents");
+  await expect(
+    page.getByRole("textbox", { name: "Service locations" }),
+  ).toHaveValue("VIC\nNSW");
+  await expect(
+    page.getByRole("textbox", { name: "Areas of focus" }),
+  ).toHaveValue("Community, Child safeguarding");
+  await expect(page.locator(".review-differences")).toContainText(
+    "Proposed replacement description",
+  );
+  await expect(page.locator(".review-differences")).toContainText(
+    previousNote.issue,
+  );
+  await page
+    .getByRole("checkbox", { name: /I checked these differences/ })
+    .check();
+  await page
+    .getByRole("checkbox", { name: /I have checked these details and approve/ })
+    .check();
+  await page
+    .getByRole("button", { name: "Approve and save", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.updates[0].profile).toMatchObject({
+    activities: [existingActivity, addedActivity],
+    insurance_policies: [existingPolicy, addedPolicy],
+    beneficiaries: ["Children", "Parents"],
+    service_locations: ["VIC", "NSW"],
+    focus_areas: ["Community", "Child safeguarding"],
+  });
+  expect(state.updates[0].profile?.review_notes).toContainEqual(previousNote);
+  await page.reload();
+  await page.getByRole("button", { name: "Edit details", exact: true }).click();
+  await page.getByText("Activities and programs", { exact: true }).click();
+  await expect(
+    page
+      .getByRole("group", { name: "Activity 2", exact: true })
+      .getByRole("textbox", { name: "Activity or program name", exact: true }),
+  ).toHaveValue(addedActivity.name);
+});
+
+test("a zero-row save keeps the review form and entries until the profile is actually saved", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  state.failUpdate = true;
+  await page.goto("/?view=organisation");
+  await page.getByRole("button", { name: "Edit details", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "What your organisation does" })
+    .fill("Director reviewed change");
+  await page
+    .getByRole("checkbox", { name: /I have checked these details and approve/ })
+    .check();
+  await page
+    .getByRole("button", { name: "Approve and save", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Your organisation details could not be saved. Your entries are still here.",
+  );
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "What your organisation does" }),
+  ).toHaveValue("Director reviewed change");
+  expect(state.organisations[0].verification_status).toBe("draft");
+  await expect(page.locator(".organisation-profile")).toContainText(
+    "Needs your review",
+  );
+  await expect(page.locator("body")).not.toContainText(
+    "Organisation details approved and saved.",
+  );
+  state.failUpdate = false;
+  await page
+    .getByRole("button", { name: "Approve and save", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.updates).toHaveLength(2);
+  expect(state.organisations[0].verification_status).toBe("approved");
+  expect(state.organisations[0].description).toBe("Director reviewed change");
+});
+
+test("insurance evidence needs an explicit choice and financial reports stay outside onboarding selection", async ({
+  page,
+}) => {
+  const insurance = {
+    ...initialDocuments[0],
+    id: "00000000-0000-4000-8000-000000000090",
+    name: "redacted-policy.pdf",
+    category: "insurance",
+    mime_type: "application/pdf",
+  };
+  const financial = {
+    ...insurance,
+    id: "00000000-0000-4000-8000-000000000091",
+    name: "private-financial.pdf",
+    category: "financial_statement",
+  };
+  const state = await prepareDocuments(page, [
+    ...initialDocuments,
+    insurance,
+    financial,
+  ]);
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    return route.fulfill({ json: stageResult(body) });
+  });
+  await openProfile(page);
+  await expect(
+    page.getByRole("checkbox", { name: insurance.name, exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("checkbox", { name: financial.name, exact: true }),
+  ).toHaveCount(0);
+  const consent = page.getByRole("checkbox", {
+    name: /Show insurance documents/,
+  });
+  await consent.check();
+  await expect(
+    page.getByRole("checkbox", { name: insurance.name, exact: true }),
+  ).not.toBeChecked();
+  await page
+    .getByRole("checkbox", { name: insurance.name, exact: true })
+    .check();
+  await consent.uncheck();
+  await consent.check();
+  await expect(
+    page.getByRole("checkbox", { name: insurance.name, exact: true }),
+  ).not.toBeChecked();
+  await page
+    .getByRole("checkbox", { name: insurance.name, exact: true })
+    .check();
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveAccessibleName(
+    "Review your organisation details",
+  );
+  expect(state.ai.map((body) => body.documentIds)).toEqual(
+    Array.from({ length: 3 }, () => [
+      ...initialDocuments.map((document) => document.id),
+      insurance.id,
+    ]),
+  );
+});
 
 test("profile review maps a source entity type to a single standard option", async ({
   page,
