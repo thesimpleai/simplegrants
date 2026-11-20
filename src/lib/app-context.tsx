@@ -19,7 +19,7 @@ import type {
   ReviewCheck,
   UploadBatchResult,
 } from "../types";
-import type { AppContextValue } from "./contracts";
+import type { AppContextValue, ProfileReviewCheckpoint } from "./contracts";
 import { configured, supabase } from "./supabase";
 import { DOCUMENT_BUCKET } from "./constants";
 import {
@@ -67,6 +67,15 @@ const empty: OrgData = {
   messages: [],
 };
 const Context = createContext<AppContextValue | null>(null);
+class AIRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+  }
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null),
     [organisations, setOrganisations] = useState<Organisation[]>(
@@ -696,6 +705,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   async function runAI(
     payload: Parameters<AppContextValue["runAI"]>[0],
     onProgress?: (stage: ProfileStage) => void,
+    profileReview?: { current: ProfileReviewCheckpoint | null },
   ): Promise<AIResult> {
     if (!supabase)
       throw new Error(
@@ -743,17 +753,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         !targetUser ||
         activeOrg.current !== targetOrg ||
         currentUserId.current !== targetUser
-      )
+      ) {
+        if (profileReview) profileReview.current = null;
         throw new Error(
           "Your selected organisation or sign-in changed. Return to the original organisation and try again. Your saved documents remain in its library.",
         );
+      }
     }
     function failure(code = "SG_AI_RESPONSE", reference?: unknown) {
       const messages: Record<string, string> = {
         SG_AI_TIMEOUT:
           original.action === "discover"
             ? "The grant search took too long. Try again, or add a grant using its official guidelines."
-            : "This AI step took too long. Your saved information is safe. Please try again.",
+            : profileReview?.current
+              ? "This AI step took too long. Try again to continue from the last completed step."
+              : "This AI step took too long. Your saved information is safe. Please try again.",
         SG_AI_QUOTA:
           "Your AI assistant has reached a service limit. Please try again later.",
         SG_AI_SETUP:
@@ -781,8 +795,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         )
           ? `${reference} (${safeCode})`
           : safeCode;
-      return new Error(
+      return new AIRequestError(
         `${messages[safeCode]}${savedFiles} Reference: ${safeReference}.`,
+        safeCode,
       );
     }
     ensureCurrent();
@@ -805,15 +820,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (result.error) throw result.error;
       session = result.data.session;
     } catch {
+      if (profileReview) profileReview.current = null;
       throw new Error(
         `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
       );
     }
     ensureCurrent();
-    if (!session || session.user.id !== targetUser)
+    if (!session || session.user.id !== targetUser) {
+      if (profileReview) profileReview.current = null;
       throw new Error(
         `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
       );
+    }
     async function requestAI(extra: Record<string, unknown> = {}) {
       ensureCurrent();
       let response: Response;
@@ -883,68 +901,121 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return body;
     }
     if (original.action === "profile") {
-      ensureCurrent();
-      onProgress?.("extract");
-      const extracted = await requestAI({ profileStage: "extract" });
-      if (
-        !isProfile(extracted.profileDraft) ||
-        typeof extracted.sourceFingerprint !== "string" ||
-        !/^[0-9a-f]{64}$/i.test(extracted.sourceFingerprint)
-      )
-        throw failure();
-      const sourceFingerprint = extracted.sourceFingerprint;
-      ensureCurrent();
-      onProgress?.("verify");
-      const verified = await requestAI({
-        profileStage: "verify",
-        profileDraft: extracted.profileDraft,
-        sourceFingerprint,
-      });
-      if (
-        !isProfile(verified.profileDraft) ||
-        !isChecks(verified.profileChecks) ||
-        verified.sourceFingerprint !== sourceFingerprint
-      )
-        throw failure();
-      ensureCurrent();
-      onProgress?.("correct");
-      const corrected = await requestAI({
-        profileStage: "correct",
-        profileDraft: verified.profileDraft,
-        profileChecks: verified.profileChecks,
-        sourceFingerprint,
-      });
-      if (
-        !isProfile(corrected.profile) ||
-        !isChecks(corrected.checks) ||
-        corrected.sourceFingerprint !== sourceFingerprint
-      )
-        throw failure();
-      ensureCurrent();
-      const evidence = [
-        extracted.evidence,
-        verified.evidence,
-        corrected.evidence,
-      ]
-        .flatMap((items) => (Array.isArray(items) ? items : []))
-        .filter(
-          (item) =>
-            isRecord(item) &&
-            typeof item.field === "string" &&
-            item.field.length <= 120 &&
-            typeof item.source === "string" &&
-            item.source.length <= 500 &&
-            typeof item.quote === "string" &&
-            item.quote.length <= 2000,
+      const scope = {
+        userId: session.user.id,
+        orgId: targetOrg,
+        text: original.text,
+        documentIds: original.documentIds,
+      };
+      const saved = profileReview?.current;
+      let checkpoint =
+        saved?.userId === scope.userId &&
+        saved.orgId === scope.orgId &&
+        saved.text === scope.text &&
+        saved.documentIds.length === scope.documentIds.length &&
+        saved.documentIds.every((id, index) => id === scope.documentIds[index])
+          ? saved
+          : null;
+      if (profileReview) profileReview.current = checkpoint;
+      function remember(next: ProfileReviewCheckpoint) {
+        ensureCurrent();
+        // Keep one bounded checkpoint for the open wizard, with no browser storage.
+        if (profileReview)
+          profileReview.current =
+            JSON.stringify(next).length <= 256 * 1024 ? next : null;
+      }
+      function mergeEvidence(existing: unknown[], added: unknown) {
+        const evidence = new Map(
+          existing.map((item) => [JSON.stringify(item), item]),
         );
-      return {
-        ...corrected,
-        evidence: [
-          ...new Map(
-            evidence.map((item) => [JSON.stringify(item), item]),
-          ).values(),
-        ].slice(0, 150),
-      } as AIResult;
+        if (Array.isArray(added))
+          for (const item of added) {
+            if (evidence.size >= 150) break;
+            if (
+              isRecord(item) &&
+              typeof item.field === "string" &&
+              item.field.length <= 120 &&
+              typeof item.source === "string" &&
+              item.source.length <= 500 &&
+              typeof item.quote === "string" &&
+              item.quote.length <= 2000
+            ) {
+              const source = {
+                field: item.field,
+                source: item.source,
+                quote: item.quote,
+              };
+              evidence.set(JSON.stringify(source), source);
+            }
+          }
+        return [...evidence.values()];
+      }
+      try {
+        if (!checkpoint) {
+          onProgress?.("extract");
+          const extracted = await requestAI({ profileStage: "extract" });
+          if (
+            !isProfile(extracted.profileDraft) ||
+            typeof extracted.sourceFingerprint !== "string" ||
+            !/^[0-9a-f]{64}$/i.test(extracted.sourceFingerprint)
+          )
+            throw failure();
+          checkpoint = {
+            ...scope,
+            sourceFingerprint: extracted.sourceFingerprint,
+            profileDraft: extracted.profileDraft,
+            evidence: mergeEvidence([], extracted.evidence),
+          };
+          remember(checkpoint);
+        }
+        if (!checkpoint.profileChecks) {
+          onProgress?.("verify");
+          const verified = await requestAI({
+            profileStage: "verify",
+            profileDraft: checkpoint.profileDraft,
+            sourceFingerprint: checkpoint.sourceFingerprint,
+          });
+          if (
+            !isProfile(verified.profileDraft) ||
+            !isChecks(verified.profileChecks) ||
+            verified.sourceFingerprint !== checkpoint.sourceFingerprint
+          )
+            throw failure();
+          checkpoint = {
+            ...checkpoint,
+            profileDraft: verified.profileDraft,
+            profileChecks: verified.profileChecks,
+            evidence: mergeEvidence(checkpoint.evidence, verified.evidence),
+          };
+          remember(checkpoint);
+        }
+        onProgress?.("correct");
+        const corrected = await requestAI({
+          profileStage: "correct",
+          profileDraft: checkpoint.profileDraft,
+          profileChecks: checkpoint.profileChecks,
+          sourceFingerprint: checkpoint.sourceFingerprint,
+        });
+        if (
+          !isProfile(corrected.profile) ||
+          !isChecks(corrected.checks) ||
+          corrected.sourceFingerprint !== checkpoint.sourceFingerprint
+        )
+          throw failure();
+        ensureCurrent();
+        if (profileReview) profileReview.current = null;
+        return {
+          ...corrected,
+          evidence: mergeEvidence(checkpoint.evidence, corrected.evidence),
+        } as AIResult;
+      } catch (error) {
+        if (
+          profileReview &&
+          !(error instanceof AIRequestError && error.code === "SG_AI_TIMEOUT")
+        )
+          profileReview.current = null;
+        throw error;
+      }
     }
     const isReceipt = (result: Record<string, unknown>) =>
       typeof result.sourceFingerprint === "string" &&

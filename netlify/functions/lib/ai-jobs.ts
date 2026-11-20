@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DOCUMENT_BUCKET } from "../../../src/lib/constants";
+import { isProfileVerification } from "../../../src/lib/ai-job-timing";
 import { authenticatedDb, serviceDb } from "./db";
 import { authAppOrigin } from "./auth-email";
 import { HttpError, json } from "./core";
@@ -10,6 +11,7 @@ const metadataSchema = jobIds.extend({
   actorId: z.string().min(1),
   createdAt: z.number(),
   expiresAt: z.number(),
+  profileVerification: z.boolean().default(false),
 });
 export type JobMetadata = z.infer<typeof metadataSchema>;
 export const JOB_LIFETIME_MS = 15 * 60 * 1000;
@@ -96,6 +98,7 @@ export async function queueAIJob(
     actorId,
     createdAt,
     expiresAt: createdAt + JOB_LIFETIME_MS,
+    profileVerification: isProfileVerification(body),
   });
   await writeJobFile(prefix, "payload.json", body);
   // Never store session tokens. Forward only to the configured application origin.

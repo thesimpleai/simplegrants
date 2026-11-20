@@ -47,6 +47,25 @@ describe("AI phase polling", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect((await result).status).toBe(422);
   });
+  it("polls for profile verification beyond the previous 150-second browser deadline", async () => {
+    const startedAt = Date.now();
+    fetchMock.mockResolvedValueOnce(reply({ orgId, jobId }, 202));
+    fetchMock.mockImplementation(async () =>
+      Date.now() - startedAt < 200000
+        ? reply({ orgId, jobId, pending: true }, 202)
+        : reply({ profileChecks: [] }),
+    );
+    const result = requestAIPhase(
+      { orgId, action: "profile", profileStage: "verify" },
+      "session",
+      () => {},
+    );
+    await vi.advanceTimersByTimeAsync(200000);
+    expect(await (await result).json()).toEqual({ profileChecks: [] });
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init.method === "POST"),
+    ).toHaveLength(1);
+  });
   it("stops polling when the actor or organisation changes", async () => {
     let changed = false;
     fetchMock.mockResolvedValueOnce(reply({ orgId, jobId }, 202));

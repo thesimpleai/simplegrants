@@ -331,6 +331,7 @@ function client() {
 export async function generateContent(
   parameters: GenerateContentParameters,
   budget?: AIRequestBudget,
+  retryProviderTimeout = false,
 ) {
   const ownedBudget = budget ? undefined : createAIRequestBudget();
   budget ??= ownedBudget!;
@@ -342,16 +343,19 @@ export async function generateContent(
         const failure = providerFailure(error);
         // Only retry a transient provider call, at most once, leaving time for
         // useful work. Database writes happen after the complete checked result.
-        if (
-          attempt > 0 ||
-          failure.reason === "TIMEOUT" ||
-          budget.remaining() < 8000 ||
-          !(
-            failure.reason === "NETWORK" ||
-            [500, 502, 503].includes(failure.status ?? 0)
-          )
-        )
-          throw error;
+        const remaining = budget.remaining();
+        const retryable =
+          failure.reason === "TIMEOUT"
+            ? retryProviderTimeout && remaining >= 60_000
+            : remaining >= 8000 &&
+              (failure.reason === "NETWORK" ||
+                [500, 502, 503].includes(failure.status ?? 0));
+        if (attempt > 0 || !retryable) throw error;
+        if (failure.reason === "TIMEOUT")
+          console.info("Simple Grants AI verification timeout retry", {
+            providerStatus: failure.status ?? "OTHER",
+            remainingMs: remaining,
+          });
         await budget.read(new Promise((resolve) => setTimeout(resolve, 250)));
       }
     }
@@ -395,6 +399,7 @@ async function generateContentAttempt(
 export interface JSONOutput {
   schema?: z.ZodType;
   maxOutputTokens?: number;
+  retryProviderTimeout?: boolean;
 }
 export function compatibleThinking(model: string) {
   if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
@@ -432,6 +437,7 @@ export async function generateJSON(
       },
     },
     budget,
+    output.retryProviderTimeout,
   );
   if (
     result.promptFeedback?.blockReason ||
@@ -616,10 +622,14 @@ export async function verifyProfileStage(
 ) {
   const draft: Profile = profileSchema.parse(profileDraft);
   const verification = await generateJSON(
-    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from ANY field in the response schema, including bilingual Chinese/English text, ABN, state, description, purpose, focus areas, history, programs and insurance. ${profileEvidenceInstructions} Return only checks, recovered_profile and evidence. Omit unknown optional fields and avoid repeating any fact already present in the draft. Put omitted supported facts in recovered_profile with a short exact evidence quote and source name per recovered field. Use the shortest exact phrase that establishes the fact. For repeatable records, evidence.field must identify the recovered array index and supported leaf (for example insurance_policies[0].insurer), or the exact indexed record (insurance_policies[0]) only when the quote supports every supplied fact in that record. A single leaf quote never supports another leaf or record; do not use a whole-array field name as recovery evidence. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Include concise checks for unresolved gaps with the corresponding schema field name. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from ANY field in the response schema, including bilingual Chinese/English text, ABN, state, description, purpose, focus areas, history, programs and insurance. ${profileEvidenceInstructions} Return only checks, recovered_profile and evidence. Report concise, distinct findings for unsupported facts, contradictions, transcription errors and unresolved gaps. Omit unknown optional fields, general source summaries and facts already present in the draft. Put omitted supported facts in recovered_profile with a short exact evidence quote and source name per recovered field. Use the shortest exact phrase that establishes the fact. For repeatable records, evidence.field must identify the recovered array index and supported leaf (for example insurance_policies[0].insurer), or the exact indexed record (insurance_policies[0]) only when the quote supports every supplied fact in that record. A single leaf quote never supports another leaf or record; do not use a whole-array field name as recovery evidence. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Use schema field names for checks. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: verifyOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
+    {
+      schema: verifyOutputSchema,
+      maxOutputTokens: PROFILE_OUTPUT_TOKENS,
+      retryProviderTimeout: true,
+    },
   );
   const evidence = evidenceSchema.parse(verification.evidence ?? []);
   const recovered = verification.recovered_profile

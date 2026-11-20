@@ -785,6 +785,119 @@ test("a non-JSON profile timeout retains saved documents, source selection and p
   expect(state.documents).toHaveLength(2);
 });
 
+for (const failedStage of ["verify", "correct"]) {
+  test(`profile retry resumes the ${failedStage} stage after a timeout`, async ({
+    page,
+  }) => {
+    const state = await prepareDocuments(page);
+    let timedOut = false;
+    await page.route("**/api/ai", (route) => {
+      const body = route.request().postDataJSON();
+      state.ai.push(body);
+      if (!timedOut && body.profileStage === failedStage) {
+        timedOut = true;
+        return route.fulfill({
+          status: 504,
+          json: { error: "Timed out", code: "SG_AI_TIMEOUT" },
+        });
+      }
+      return route.fulfill({ json: stageResult(body) });
+    });
+    const text = "Keep the original wording and documents for the retry.";
+    await openProfile(page, text);
+    const prepare = page.getByRole("button", {
+      name: "Prepare my profile",
+      exact: true,
+    });
+    await prepare.click();
+    await expect(page.getByRole("alert")).toContainText(
+      "continue from the last completed step",
+    );
+    await expect(page.getByRole("alert")).toContainText("SG_AI_TIMEOUT");
+    const timedOutRequest = state.ai.at(-1);
+    await prepare.click();
+    await expect(page.getByRole("dialog")).toHaveAccessibleName(
+      "Review your organisation details",
+    );
+    await expect(
+      page.getByRole("button", { name: "Approve and save" }),
+    ).toBeDisabled();
+    expect(state.ai.map((body) => body.profileStage)).toEqual(
+      failedStage === "verify"
+        ? ["extract", "verify", "verify", "correct"]
+        : ["extract", "verify", "correct", "correct"],
+    );
+    expect(
+      state.ai.filter((body) => body.profileStage === failedStage),
+    ).toEqual([timedOutRequest, timedOutRequest]);
+    expect(state.updates).toHaveLength(0);
+  });
+}
+
+for (const invalidation of ["edited inputs", "a stale source fingerprint"]) {
+  test(`profile retry restarts extraction after ${invalidation}`, async ({
+    page,
+  }) => {
+    const state = await prepareDocuments(page);
+    let corrections = 0;
+    await page.route("**/api/ai", (route) => {
+      const body = route.request().postDataJSON();
+      state.ai.push(body);
+      if (body.profileStage === "correct") {
+        corrections++;
+        if (corrections === 1)
+          return route.fulfill({
+            status: 504,
+            json: { error: "Timed out", code: "SG_AI_TIMEOUT" },
+          });
+        if (corrections === 2 && invalidation === "a stale source fingerprint")
+          return route.fulfill({
+            status: 409,
+            json: {
+              error: "The original sources changed. Restart the review.",
+            },
+          });
+      }
+      return route.fulfill({ json: stageResult(body) });
+    });
+    await openProfile(page);
+    const prepare = page.getByRole("button", {
+      name: "Prepare my profile",
+      exact: true,
+    });
+    await prepare.click();
+    await expect(page.getByRole("alert")).toContainText("SG_AI_TIMEOUT");
+    if (invalidation === "edited inputs") {
+      await page
+        .getByRole("checkbox", { name: "history.xlsx", exact: true })
+        .uncheck();
+    } else {
+      await prepare.click();
+      await expect(page.getByRole("alert")).toContainText(
+        "The original sources changed",
+      );
+    }
+    await prepare.click();
+    await expect(page.getByRole("dialog")).toHaveAccessibleName(
+      "Review your organisation details",
+    );
+    expect(state.ai.map((body) => body.profileStage)).toEqual([
+      "extract",
+      "verify",
+      "correct",
+      ...(invalidation === "a stale source fingerprint" ? ["correct"] : []),
+      "extract",
+      "verify",
+      "correct",
+    ]);
+    if (invalidation === "edited inputs")
+      expect(state.ai.slice(-3).map((body) => body.documentIds)).toEqual(
+        Array.from({ length: 3 }, () => [initialDocuments[0].id]),
+      );
+    expect(state.updates).toHaveLength(0);
+  });
+}
+
 test("real DOCX and XLSX file inputs infer missing browser MIME and store canonical metadata", async ({
   page,
 }) => {
