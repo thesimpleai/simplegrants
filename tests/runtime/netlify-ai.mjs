@@ -37,6 +37,7 @@ const live = process.argv.includes("--live");
 const quick = process.argv.includes("--quick");
 const flashModel = "gemini-flash-latest";
 const neonModel = "gemini-4-neon";
+const reviewDraftPrefix = `simple-grant-documents/.setup-review-drafts/${orgId}/${actorId}`;
 const liveFallbacks = [];
 if (live && !process.env.GEMINI_API_KEY)
   throw Error(
@@ -477,7 +478,12 @@ try {
       basePath: process.cwd(),
     },
   );
-  for (const name of ["ai", "ai-jobs", "ai-worker-background"]) {
+  for (const name of [
+    "ai",
+    "ai-jobs",
+    "ai-worker-background",
+    "setup-review-drafts",
+  ]) {
     const fn = packaged.find((fn) => fn.name === name);
     assert.ok(fn);
     if (name.endsWith("background"))
@@ -561,6 +567,9 @@ try {
   await expect(
     page.getByRole("textbox", { name: "Organisation name", exact: true }),
   ).toHaveValue("Runtime Community Association");
+  await expect
+    .poll(() => objects.has(`${reviewDraftPrefix}/profile.json`))
+    .toBe(true);
   assert.equal(state.orgWrites, 0);
   assert.equal(state.claims, 3);
   if (!live) {
@@ -747,7 +756,13 @@ try {
     state.profileOutputLimit = true;
     await page.goto(`${site}/?view=organisation&org=${orgId}`);
     await page
-      .getByRole("button", { name: "Update with AI", exact: true })
+      .getByRole("button", { name: "Resume profile draft", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveAccessibleName(
+      "Review your organisation details",
+    );
+    await page
+      .getByRole("button", { name: "Back to sources", exact: true })
       .click();
     await profileHistory.fill(sourceText);
     await prepareProfile.click();
@@ -806,6 +821,7 @@ try {
       .check();
     await page.getByRole("button", { name: "Approve and save" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    assert.equal(objects.has(`${reviewDraftPrefix}/profile.json`), false);
     assert.equal(state.orgWrites, 1);
     assert.equal(state.orgs[0].profile.description, reviewedDescription);
     assert.equal(state.orgs[0].profile.mission, org.profile.mission);
@@ -843,6 +859,13 @@ try {
     await expect(wizard).toHaveAccessibleName("Review grant setup answers", {
       timeout: 30000,
     });
+    await expect(wizard.getByText("Draft saved for later.")).toBeVisible();
+    const setupDraftPath = `${reviewDraftPrefix}/grant-setup.json`;
+    const setupDraft = JSON.parse(objects.get(setupDraftPath).bytes.toString());
+    assert.deepEqual(
+      setupDraft.data.evidence.map(({ quote }) => quote),
+      setupSourceFacts.map(({ quote }) => quote),
+    );
     const legalName = wizard.getByRole("group", {
       name: "What is your registered legal name?",
       exact: true,
@@ -904,6 +927,22 @@ try {
     assert.ok(!conflict.includes("inlineData"));
     console.log(
       "PASS: Flash reads each original separately; Neon LOW compares excerpts and falls back on denied access in the same job and quota claim",
+    );
+    await legalName
+      .locator(".grant-setup-alternative")
+      .filter({ hasText: setupSourceFacts[1].value })
+      .getByRole("button", { name: "Use this answer" })
+      .click();
+    await wizard
+      .getByRole("checkbox", { name: /I’ve checked the answers/ })
+      .check();
+    await wizard.getByRole("button", { name: "Save reviewed answers" }).click();
+    await expect(wizard).toHaveCount(0);
+    assert.equal(state.orgWrites, 2);
+    assert.equal(state.orgs[0].profile.legal_name, setupSourceFacts[1].value);
+    assert.equal(objects.has(setupDraftPath), false);
+    console.log(
+      "PASS: packaged setup saves private review progress and removes it after explicit approval",
     );
   }
   if (live) {
