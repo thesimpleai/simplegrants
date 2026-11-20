@@ -250,11 +250,23 @@ export default function OpportunitiesPage({
     }
   }
   async function apply(o: Opportunity) {
+    setBusy(true);
+    setError("");
     try {
-      await app.startApplication(o);
+      const application = await app.startApplication(o);
+      try {
+        sessionStorage.setItem(
+          `simple-grants-open-application:${app.user?.id ?? "demo"}:${o.org_id}`,
+          application.id,
+        );
+      } catch {
+        /* Opening the application remains available from its list. */
+      }
       onApply();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setBusy(false);
     }
   }
   async function toggleSaved(o: Opportunity) {
@@ -567,6 +579,7 @@ export default function OpportunitiesPage({
               </button>
               <button
                 className="button primary"
+                disabled={busy}
                 onClick={() => apply(opportunity)}
               >
                 Start application <ArrowUpRight size={17} />

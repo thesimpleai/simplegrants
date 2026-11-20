@@ -281,7 +281,7 @@ describe("separate authenticated profile stages", () => {
         await call({
           profileStage: "correct",
           profileDraft,
-          profileChecks: Array(51).fill(check),
+          profileChecks: Array(301).fill(check),
           sourceFingerprint: "a".repeat(64),
         })
       ).status,

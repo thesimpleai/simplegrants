@@ -31,10 +31,9 @@ test("overview, search, saved grants and source-gated application", async ({
   await expect(
     page.getByRole("heading", { name: "Your applications" }),
   ).toBeVisible();
-  await page
-    .locator(".application-row")
-    .filter({ hasText: "Stronger Neighbourhoods Fund" })
-    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Stronger Neighbourhoods Fund",
+  );
   await expect(
     page.getByRole("button", { name: "Prepare draft with AI" }),
   ).toBeDisabled();

@@ -5,7 +5,8 @@ export type AIFailure = "timeout" | "response";
 export class AIExecutionError extends Error {
   constructor(
     public kind: AIFailure,
-    public reason?: "MODEL_OUTPUT_LIMIT" | "EMPTY_TEXT" | "INVALID_JSON",
+    public reason?:
+      "MODEL_OUTPUT_LIMIT" | "EMPTY_TEXT" | "INVALID_JSON" | "PROVIDER_BLOCKED",
     public usage?: {
       inputTokens?: number;
       outputTokens?: number;
@@ -115,8 +116,10 @@ export function providerFailure(
   depth = 0,
 ): {
   status?: number;
-  reason: "TIMEOUT" | "NETWORK" | "PROVIDER" | "OTHER";
+  reason: "TIMEOUT" | "NETWORK" | "PROVIDER" | "PROVIDER_BLOCKED" | "OTHER";
 } {
+  if (error instanceof AIExecutionError && error.reason === "PROVIDER_BLOCKED")
+    return { reason: "PROVIDER_BLOCKED" };
   const timedOut = isProviderTimeout(error);
   if (!error || typeof error !== "object" || error instanceof HttpError)
     return { reason: "OTHER" };
@@ -321,6 +324,11 @@ export function aiFailureResponse(
     code = "SG_AI_SETUP";
     message =
       "AI is not fully configured. Ask an administrator to check the server settings.";
+  } else if (failure.reason === "PROVIDER_BLOCKED") {
+    code = "SG_AI_BLOCKED";
+    status = 422;
+    message =
+      "The AI provider could not process these sources under its safety rules. Your saved information is safe. You can enter the organisation details manually or try another relevant source document for review.";
   } else if (
     error instanceof AIExecutionError &&
     error.reason === "MODEL_OUTPUT_LIMIT"
@@ -342,9 +350,12 @@ export function aiFailureResponse(
   const reference = randomUUID();
   const failureReason =
     error instanceof AIExecutionError &&
-    ["MODEL_OUTPUT_LIMIT", "EMPTY_TEXT", "INVALID_JSON"].includes(
-      error.reason || "",
-    )
+    [
+      "MODEL_OUTPUT_LIMIT",
+      "EMPTY_TEXT",
+      "INVALID_JSON",
+      "PROVIDER_BLOCKED",
+    ].includes(error.reason || "")
       ? error.reason
       : error instanceof Error && error.name === "ZodError"
         ? "SCHEMA_MISMATCH"

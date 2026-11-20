@@ -112,7 +112,7 @@ export const handler = schedule("0 * * * *", async () => {
       )
         throw new Error("Notification preferences changed before delivery.");
       const portal = new URL(`/?org=${org.id}&view=organisation`, siteUrl).href;
-      const text = `Your ${org.notification_frequency} Simple Grant search\n\n${publicLines.length ? publicLines.join("\n\n") : "No current source-backed opportunities were established in this search. You can add a grant from its official guidelines in your portal."}\n\nEligibility and dates need confirmation with each provider.\n\nTo change or stop these searches, sign in and choose weekly, monthly or never under your organisation preferences: ${portal}`;
+      const text = `Your ${org.notification_frequency} Simple Grants search\n\n${publicLines.length ? publicLines.join("\n\n") : "No current source-backed opportunities were established in this search. You can add a grant from its official guidelines in your portal."}\n\nEligibility and dates need confirmation with each provider.\n\nTo change or stop these searches, sign in and choose weekly, monthly or never under your organisation preferences: ${portal}`;
       const send = await resend.emails.send(
         {
           from: sender,

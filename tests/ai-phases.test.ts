@@ -215,6 +215,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("signed, separate grant discovery phases", () => {
+  it("uses the Melbourne calendar day for grounded search across UTC midnight", async () => {
+    vi.setSystemTime(new Date("2026-11-16T13:30:00Z"));
+    search();
+    expect((await call({ discoveryStage: "search" })).status).toBe(200);
+    const parameters = mocks.generateContent.mock.calls[0][0];
+    expect(parameters.contents).toContain("2026-11-17 in Australia/Melbourne");
+    expect(parameters.config.systemInstruction).toContain(
+      "2026-11-17 in Australia/Melbourne",
+    );
+  });
   it("gives a search-specific timeout message without document advice", async () => {
     mocks.generateContent.mockRejectedValueOnce(
       Object.assign(new Error("deadline"), { status: 504 }),
@@ -320,6 +330,62 @@ describe("signed, separate grant discovery phases", () => {
   });
 });
 describe("signed, separate application preparation", () => {
+  it("reuses approved expanded organisation evidence through preflight and drafting", async () => {
+    org.profile = {
+      ...(org.profile as object),
+      mission: "Prevent abuse through child safeguarding education",
+      beneficiaries: ["Children and families"],
+      history: "A documented organisation history",
+      activities: [
+        {
+          name: "Educational workshops",
+          status: "current",
+          source: "Synthetic annual report",
+        },
+      ],
+      charity_registration_date: "2026-06-19",
+      source_evidence: [
+        { field: "history", quote: "REJECTED-EXTRACTION-CANDIDATE" },
+      ],
+      review_notes: [{ field: "history", issue: "UNRESOLVED-REVIEW-FINDING" }],
+      insurance_policies: [
+        {
+          insurer: "Synthetic insurer",
+          policy_type: "Public liability",
+          policy_number: "SYNTHETIC-PRIVATE-POLICY",
+          expires_on: "2027-06-19",
+        },
+      ],
+    };
+    const state = await preflight();
+    model(validDraft());
+    const response = await call({
+      action: "draft",
+      draftStage: "generate",
+      opportunityId: grantId,
+      applicationId: appId,
+      ...state,
+    });
+    expect(response.status).toBe(200);
+    for (const [parameters] of mocks.generateContent.mock.calls) {
+      const prompt = JSON.stringify(parameters.contents);
+      expect(prompt).toContain(
+        "Prevent abuse through child safeguarding education",
+      );
+      expect(prompt).toContain("Educational workshops");
+      expect(prompt).toContain("2026-06-19");
+      expect(prompt).toContain("SYNTHETIC-PRIVATE-POLICY");
+      expect(prompt).not.toContain("REJECTED-EXTRACTION-CANDIDATE");
+      expect(prompt).not.toContain("UNRESOLVED-REVIEW-FINDING");
+      expect(parameters.config.systemInstruction).toContain(
+        "Australia/Melbourne",
+      );
+      expect(parameters.config.systemInstruction).toContain("2026-11-11");
+    }
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      "SYNTHETIC-PRIVATE-POLICY",
+    );
+  });
   it("performs one preflight with no write and one generation with checked final output", async () => {
     const state = await preflight();
     expect(mocks.write).not.toHaveBeenCalled();

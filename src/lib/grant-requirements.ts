@@ -1,4 +1,5 @@
 import type { DocumentRecord } from "../types";
+import { profileDateOnly, profileToday } from "./profile-dates";
 
 type EvidenceDocument = Pick<DocumentRecord, "category" | "expires_on">;
 
@@ -10,23 +11,14 @@ export const isInsuranceCategory = (category: string) =>
     "public_liability_insurance",
   ].includes(category);
 export function validExpiryDate(value: string): boolean {
-  return (
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
-    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
-  );
+  return profileDateOnly(value) !== null;
 }
 export function documentExpiryStatus(
   value: string | null | undefined,
   now = new Date(),
 ): "unknown" | "expired" | "current" {
   if (!value || !validExpiryDate(value)) return "unknown";
-  const today = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Australia/Melbourne",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
+  const today = profileToday(now);
   return value < today ? "expired" : "current";
 }
 export function hasCurrentInsurance(
