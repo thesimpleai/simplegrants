@@ -169,7 +169,7 @@ export const evidence = [
     name: doc.name,
     mime_type: doc.mime_type,
     size_bytes: doc.bytes.length,
-    category: doc.name === "Budget.xlsx" ? "financial_statement" : "history",
+    category: doc.name === "Budget.xlsx" ? "financial_statement" : "other",
     storage_path: `${orgId}/${doc.id}/${doc.name}`,
     verified: false,
     created_at: "2026-11-01T00:00:00Z",
@@ -197,12 +197,10 @@ export function providerReply(body) {
       profile,
       checks: [],
       evidence: [],
-      missing_information: [],
     });
-  else if (properties?.verified_fields)
+  else if (properties?.recovered_profile)
     text = JSON.stringify({
       checks: [],
-      verified_fields: ["name", "state", "description"],
       recovered_profile: {},
       evidence: [],
     });

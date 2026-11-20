@@ -264,11 +264,9 @@ function groundedRecovery(
 const extractOutputSchema = z.object({
   profile: nullableProfileSchema,
   evidence: evidenceSchema.optional(),
-  missing_information: z.array(z.string().max(1000)).max(40).optional(),
 });
 const verifyOutputSchema = z.object({
   checks: z.array(nullableCheckSchema).max(50),
-  verified_fields: z.array(z.string().max(120)).max(40).optional(),
   recovered_profile: nullableProfileSchema.partial().optional(),
   evidence: evidenceSchema.optional(),
 });
@@ -401,7 +399,8 @@ export interface JSONOutput {
 export function compatibleThinking(model: string) {
   if (/^gemini-2\.5-flash(?:-preview-[0-9-]+)?$/.test(model))
     return { thinkingBudget: 0 };
-  if (/^gemini-3(?:\.[0-9]+)?-flash(?:-preview)?$/.test(model))
+  if (model === "gemini-3.8-flash") return { thinkingLevel: ThinkingLevel.LOW };
+  if (/^gemini-3(?:\.0)?-flash(?:-preview)?$/.test(model))
     return { thinkingLevel: ThinkingLevel.MINIMAL };
   return undefined; // In particular, a moving alias must not receive model-specific flags.
 }
@@ -448,6 +447,7 @@ export async function generateJSON(
     throw new AIExecutionError("response", "PROVIDER_BLOCKED");
   if (result.candidates?.[0]?.finishReason === "MAX_TOKENS")
     throw new AIExecutionError("response", "MODEL_OUTPUT_LIMIT", {
+      inputTokens: result.usageMetadata?.promptTokenCount,
       outputTokens: result.usageMetadata?.candidatesTokenCount,
       thinkingTokens: result.usageMetadata?.thoughtsTokenCount,
       tokenLimit: output.maxOutputTokens ?? 4096,
@@ -466,9 +466,11 @@ export async function generateJSON(
   ) as Record<string, unknown>;
 }
 export const MAX_AI_EXTRACTED_TEXT_CHARS = 400_000;
+const PROFILE_OUTPUT_TOKENS = 16_384;
+const compactProfileSummary = `Omit unknown optional fields, empty arrays and null placeholders. Avoid repeating the same prose across fields. Summarise long passages with short descriptions, mission and history (up to 1200 characters each). Preserve exact legal names, identifiers and amounts, and use the date rules above. For the review, include up to 24 distinct evidence quotes, each no more than 160 characters, prioritising legal identity, dates, insurance and disputed facts. Use the shortest exact phrase that supports each item.`;
 // Name the full contract in all three passes: a short legacy example caused
 // otherwise valid organisation facts to be omitted before schema validation.
-const profileEvidenceInstructions = `Extract description, mission (purpose), focus_areas, beneficiaries and service_locations where stated. Capture documented history, milestones and activities/programs separately: activities have a name, description, status (current, historical, planned or unspecified), documented start_date/end_date, outcomes and source; milestones have a title, documented date, details and source. A stated aim or activity is not proof of completed work, participant counts or achieved outcomes. Keep unknown dates, places and outcomes blank. Extract legal_name, ABN, type, state, website, acnc_registered and separately founded_on, registration_date, registration_authority, registration_number, charity_registration_date, charity_registration_number and certificate_issue_date. Never treat a certificate issue date or charity registration date as the founding date. Extract repeatable insurance_policies with insurer, policy_type, policy_number, coverage, coverage_amount, starts_on, expires_on, issued_on and source only where documented. Keep policy numbers private to this authorised profile review. Other useful documented organisation facts may be recorded in other_facts as label/value/source. Use YYYY-MM-DD only for complete documented dates; preserve a stated year or approximate period verbatim rather than inventing a day. Evidence must name the actual original document or pasted material and quote its exact supporting words, including translated context only if clearly identified. Include field-specific short quotes for populated fields and repeatable records, at most 50 quotes of at most 360 characters. Treat non-graphic child safeguarding, abuse prevention and education as legitimate charitable purposes; preserve supported information without euphemisms. Provider safety controls still apply. Do not infer a founding date, historical programs, participants, outcomes, locations, budgets or commitments from a mission statement.`;
+const profileEvidenceInstructions = `Extract description, mission (purpose), focus_areas, beneficiaries and service_locations where stated. Capture documented history, milestones and activities/programs separately: activities have a name, description, status (current, historical, planned or unspecified), documented start_date/end_date, outcomes and source; milestones have a title, documented date, details and source. A stated aim or activity is not proof of completed work, participant counts or achieved outcomes. Keep unknown dates, places and outcomes blank. Extract legal_name, ABN, type, state, website, acnc_registered and separately founded_on, registration_date, registration_authority, registration_number, charity_registration_date, charity_registration_number and certificate_issue_date. Never treat a certificate issue date or charity registration date as the founding date. Extract repeatable insurance_policies with insurer, policy_type, policy_number, coverage, coverage_amount, starts_on, expires_on, issued_on and source only where documented. Keep policy numbers private to this authorised profile review. Other useful documented organisation facts may be recorded in other_facts as label/value/source. Use YYYY-MM-DD only for complete documented dates; preserve a stated year or approximate period verbatim rather than inventing a day. Evidence must name the actual original document or pasted material and quote its exact supporting words, including translated context only if clearly identified. Treat non-graphic child safeguarding, abuse prevention and education as legitimate charitable purposes; preserve supported information without euphemisms. Provider safety controls still apply. Do not infer a founding date, historical programs, participants, outcomes, locations, budgets or commitments from a mission statement.`;
 export type DocumentSourceDigest = { documentId: string; sha256: string };
 export function profileSourceFingerprint(
   text: string,
@@ -592,10 +594,10 @@ export async function extractProfileStage(
     );
   const existingContext = `Existing user-entered profile is CONTEXT ONLY, NOT SOURCE EVIDENCE. Do not retain a field merely because it occurs here: ${JSON.stringify(approvedProfileFacts(org.profile))}`;
   const extracted = await generateJSON(
-    `Extract an organisation profile ONLY from the supplied evidence using every supported field in the response schema. ${profileEvidenceInstructions} Keep the description concise (at most 1200 characters), retaining the purpose, focus areas and stated activities. Never reproduce whole source passages. Return {"profile":{supported fields only},"evidence":[{"field":"","source":"","quote":""}],"missing_information":[]}. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
+    `Extract an organisation profile ONLY from the supplied evidence using every supported field in the response schema. ${profileEvidenceInstructions} ${compactProfileSummary} Return only profile and evidence. Omit unsupported fields, especially acnc_registered rather than guessing false. ${existingContext}\nORIGINAL EVIDENCE:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: extractOutputSchema, maxOutputTokens: 12288 },
+    { schema: extractOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   return {
     profileDraft: normaliseProfile(extracted.profile),
@@ -614,10 +616,10 @@ export async function verifyProfileStage(
 ) {
   const draft: Profile = profileSchema.parse(profileDraft);
   const verification = await generateJSON(
-    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from ANY field in the response schema, including bilingual Chinese/English text, ABN, state, description, purpose, focus areas, history, programs and insurance. ${profileEvidenceInstructions} Return omitted supported facts only in recovered_profile, with an exact short evidence quote and source name for each recovered field. For repeatable records, evidence.field must identify the recovered array index and supported leaf (for example insurance_policies[0].insurer), or the exact indexed record (insurance_policies[0]) only when the quote supports every supplied fact in that record. A single leaf quote never supports another leaf or record; do not use a whole-array field name as recovery evidence. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Include unresolved gaps as checks with the corresponding schema field name. Return {"checks":[{"field":"","issue":"","source":"document name or pasted material","suggestion":"correction or leave blank"}],"verified_fields":[],"recovered_profile":{},"evidence":[{"field":"","source":"","quote":""}]}. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Independently verify this proposed profile against the ORIGINAL evidence supplied below and attached. Also inspect the sources for supported facts OMITTED from ANY field in the response schema, including bilingual Chinese/English text, ABN, state, description, purpose, focus areas, history, programs and insurance. ${profileEvidenceInstructions} Return only checks, recovered_profile and evidence. Omit unknown optional fields and avoid repeating any fact already present in the draft. Put omitted supported facts in recovered_profile with a short exact evidence quote and source name per recovered field. Use the shortest exact phrase that establishes the fact. For repeatable records, evidence.field must identify the recovered array index and supported leaf (for example insurance_policies[0].insurer), or the exact indexed record (insurance_policies[0]) only when the quote supports every supplied fact in that record. A single leaf quote never supports another leaf or record; do not use a whole-array field name as recovery evidence. Never fill from the existing saved profile or assumptions. Compare each field and exact ABN. Detect unsupported facts, contradictions and transcriptions. Include concise checks for unresolved gaps with the corresponding schema field name. Proposed profile: ${JSON.stringify(draft)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: verifyOutputSchema, maxOutputTokens: 12288 },
+    { schema: verifyOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   const evidence = evidenceSchema.parse(verification.evidence ?? []);
   const recovered = verification.recovered_profile
@@ -658,10 +660,10 @@ export async function correctProfileStage(
   const draft = profileSchema.parse(profileDraft),
     checks = validateProfileDates(draft, checksSchema.parse(profileChecks));
   const corrected = await generateJSON(
-    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Start from the complete proposed profile and change only fields contradicted or unsupported by the originals. Preserve ALL supported fields and repeatable records, including bilingual sources. ${profileEvidenceInstructions} Do not silently omit a populated field: explain every removed fact in checks using its schema field name. A blank field is not a correction unless its evidence is absent or disputed. Keep the description concise (at most 1200 characters). Consider every verification finding and preserve every unresolved check; reassess date warnings against the current server date supplied in your system context and drop obsolete future/expiry warnings. Remove unsupported fields; preserve unresolved contradictions and missing information as field-specific checks. Return {"profile":{...},"checks":[{"field":"","issue":"","source":"","suggestion":""}],"evidence":[{"field":"","source":"","quote":""}]}. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
+    `Correct the proposed profile using the ORIGINAL sources, not assumptions. Start from the complete proposed profile and change only fields contradicted or unsupported by the originals. Preserve ALL supported fields and repeatable records, including bilingual sources. ${profileEvidenceInstructions} ${compactProfileSummary} Do not silently omit a populated field: explain every removed fact in checks using its schema field name. A blank field is not a correction unless its evidence is absent or disputed. Consider every verification finding and preserve every unresolved check; reassess date warnings against the current server date supplied in your system context and drop obsolete future/expiry warnings. Remove unsupported fields; preserve unresolved contradictions and missing information as concise, field-specific checks. Return only profile, checks and evidence. Do not mark the profile approved. Proposed profile: ${JSON.stringify(draft)}\nIndependent findings: ${JSON.stringify(checks)}\nORIGINAL SOURCES:\nPasted ORIGINAL source material:\n${text}`,
     parts,
     budget,
-    { schema: correctOutputSchema, maxOutputTokens: 16384 },
+    { schema: correctOutputSchema, maxOutputTokens: PROFILE_OUTPUT_TOKENS },
   );
   const correctedProfile = normaliseProfile(corrected.profile);
   const review = completeProfileReview(
