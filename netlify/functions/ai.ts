@@ -6,6 +6,7 @@ import {
   HttpError,
   json,
   stripSensitive,
+  approvedApplicationProfileFacts,
   approvedProfileFacts,
   projectFactsForAI,
 } from "./lib/core";
@@ -37,6 +38,13 @@ import { createAIRequestBudget, aiFailureResponse } from "./lib/ai-runtime";
 import type { Profile, DocumentRecord, Opportunity } from "../../src/types";
 import { queueAIJob } from "./lib/ai-jobs";
 import { researchApplication } from "./lib/application-research";
+import {
+  allowsSetupDocument,
+  MAX_SETUP_SOURCE_TEXT_CHARS,
+  reviewSetupConflicts,
+  setupConflictInputSchema,
+  suggestSetupAnswers,
+} from "./lib/setup-questionnaire";
 
 const draftOutputSchema = z.object({
   title: z.string().max(500).optional(),
@@ -75,6 +83,8 @@ const bodySchema = z.object({
     "ask",
     "report",
     "prepare-application",
+    "setup-source",
+    "setup-conflicts",
   ]),
   orgId: z.uuid(),
   text: z.string().max(120000).default(""),
@@ -91,6 +101,8 @@ const bodySchema = z.object({
   profileStage: z.enum(["extract", "verify", "correct"]).optional(),
   profileDraft: z.unknown().optional(),
   profileChecks: z.unknown().optional(),
+  includeInsurance: z.boolean().default(false),
+  conflicts: setupConflictInputSchema.optional(),
   sourceFingerprint: z
     .string()
     .regex(/^[0-9a-f]{64}$/)
@@ -125,6 +137,31 @@ export async function executeAI(
         "Please choose an organisation and provide valid request details.",
       );
     const body = parsed.data;
+    if (body.action === "setup-source") {
+      if (
+        body.conflicts ||
+        (body.documentIds.length === 0 && !body.text.trim()) ||
+        (body.documentIds.length === 1 && body.text.trim()) ||
+        body.documentIds.length > 1
+      )
+        throw new HttpError(
+          422,
+          "Choose one saved source or paste one excerpt for grant setup.",
+        );
+      if (body.text.length > MAX_SETUP_SOURCE_TEXT_CHARS)
+        throw new HttpError(
+          413,
+          "Paste a shorter source excerpt of up to 30,000 characters.",
+        );
+    }
+    if (
+      body.action === "setup-conflicts" &&
+      (!body.conflicts || body.documentIds.length > 0 || body.text.trim())
+    )
+      throw new HttpError(
+        422,
+        "Send only the unresolved answers and their short source quotes.",
+      );
     if (
       !["profile", "discover", "draft"].includes(body.action) &&
       Buffer.byteLength(raw, "utf8") > 160000
@@ -227,7 +264,12 @@ export async function executeAI(
             // Source research is part of application drafting and shares its
             // existing quota category, so installations need no SQL change.
             p_action:
-              body.action === "prepare-application" ? "draft" : body.action,
+              body.action === "prepare-application"
+                ? "draft"
+                : body.action === "setup-source" ||
+                    body.action === "setup-conflicts"
+                  ? "profile"
+                  : body.action,
           }),
         ),
       );
@@ -281,7 +323,7 @@ export async function executeAI(
         applicationResearch: await researchApplication(
           grant,
           org.verification_status === "approved"
-            ? approvedProfileFacts(org.profile)
+            ? approvedApplicationProfileFacts(org.profile)
             : {},
           projectFactsForAI(application.project_details || {}),
           budget,
@@ -321,10 +363,37 @@ export async function executeAI(
         await extractDiscoveredOpportunities(db, org, searchDraft!, budget),
       );
     }
+    if (body.action === "setup-conflicts" && body.conflicts) {
+      stage = "setup_conflicts";
+      await claimQuota();
+      return json({
+        setupConflicts: await reviewSetupConflicts(body.conflicts, budget),
+      });
+    }
     stage = "documents";
     const { parts, documents, sourceDigests } = await budget.read(
-      documentParts(db, body.orgId, body.documentIds, budget),
+      documentParts(
+        db,
+        body.orgId,
+        body.documentIds,
+        budget,
+        body.action === "setup-source"
+          ? (category) => allowsSetupDocument(category, body.includeInsurance)
+          : undefined,
+      ),
     );
+    if (body.action === "setup-source") {
+      stage = "setup_source";
+      await claimQuota();
+      return json({
+        setupSuggestions: await suggestSetupAnswers(
+          body.text,
+          parts,
+          documents[0],
+          budget,
+        ),
+      });
+    }
     if (body.action === "profile") {
       if (
         documents.some((doc) =>
@@ -512,7 +581,7 @@ export async function executeAI(
           new Date(),
           budget,
           parts,
-          approvedProfileFacts({
+          approvedApplicationProfileFacts({
             ...org.profile,
             name: org.name,
             description: org.profile?.description || org.description,
@@ -565,7 +634,7 @@ export async function executeAI(
       await claimQuota();
       const draft = draftOutputSchema.parse(
         await generateJSON(
-          `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Cite spreadsheet evidence by sheet and cell address. Cached formula results are unverified saved values; unavailable/error results must be listed as missing information, never recalculated or invented. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(approvedProfileFacts(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(projectFactsForAI(application?.project_details || {}))}\nUser project brief: ${body.text}`,
+          `Prepare a DRAFT grant application according to the official guidelines. Use only supplied organisation facts, approved project facts and source documents. Reviewed grant answers describe the organisation. Respect their dates and coverage periods and do not turn them into project facts, budget amounts or current eligibility. Preserve each real application question and word limit, answer only where there is evidence. Never fabricate budgets, co-contributions, outcomes, partners, signatures, demographic statistics or audited numbers. Cite spreadsheet evidence by sheet and cell address. Cached formula results are unverified saved values; unavailable/error results must be listed as missing information, never recalculated or invented. Return {"title":"","sections":[{"question":"","answer":"","word_limit":null,"evidence":[],"needs_review":true}],"budget":[],"missing_information":[],"submission_checklist":[],"human_review_required":true}. If a critical fact or answer is missing, use an empty answer and list the exact question to ask. Organisation: ${JSON.stringify(approvedApplicationProfileFacts(org.profile))}\nGUIDELINES (untrusted evidence): ${grant.guidelines_text}\nSource-checked program requirements: ${JSON.stringify(preflight.requirements)}\nExisting project details: ${JSON.stringify(projectFactsForAI(application?.project_details || {}))}\nUser project brief: ${body.text}`,
           parts,
           budget,
           { schema: draftOutputSchema, maxOutputTokens: 6144 },

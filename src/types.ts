@@ -1,4 +1,9 @@
 import type { ApplicationResearch } from "./lib/application-research";
+import type {
+  SetupQuestionKey,
+  SetupSuggestion,
+} from "./lib/setup-questionnaire";
+
 export type Frequency = "weekly" | "monthly" | "never";
 export interface ProfileMilestone {
   title: string;
@@ -196,6 +201,13 @@ export interface DraftRequirements {
   })[];
 }
 export interface AIResult {
+  setupSuggestions?: SetupSuggestion[];
+  setupConflicts?: {
+    questionKey: SetupQuestionKey;
+    alternatives: SetupSuggestion[];
+    recommendedAlternative?: number;
+    note?: string;
+  }[];
   applicationResearch?: ApplicationResearch;
   searchDraft?: SearchDraft;
   draftRequirements?: DraftRequirements;

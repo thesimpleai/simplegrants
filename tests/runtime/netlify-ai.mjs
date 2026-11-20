@@ -29,6 +29,8 @@ import {
   application,
   evidence,
   providerReply,
+  setupEvidence,
+  setupSourceFacts,
 } from "./fixtures.mjs";
 const run = promisify(execFile);
 const live = process.argv.includes("--live");
@@ -55,6 +57,8 @@ const state = {
   modelCalls: 0,
   payloads: [],
   workers: [],
+  setupJobs: new Map(),
+  setupEvents: [],
   errors: [],
   providerFailure: 0,
   profileOutputLimit: false,
@@ -309,6 +313,19 @@ const server = createServer(async (request, response) => {
         request.headers,
         raw,
       );
+      if (name === "ai" && body?.action?.startsWith("setup-")) {
+        assert.equal(result.status, 202);
+        const { jobId } = await result.clone().json();
+        state.setupJobs.set(jobId, body);
+        state.setupEvents.push(["queued", body.action, body.documentIds]);
+      }
+      const setupJob = state.setupJobs.get(url.searchParams.get("jobId"));
+      if (name === "ai-jobs" && setupJob && result.status === 200)
+        state.setupEvents.push([
+          "completed",
+          setupJob.action,
+          setupJob.documentIds,
+        ]);
       response.writeHead(result.status, Object.fromEntries(result.headers));
       return response.end(Buffer.from(await result.arrayBuffer()));
     }
@@ -707,6 +724,85 @@ try {
     assert.equal(state.orgs[0].profile.mission, org.profile.mission);
     console.log(
       "PASS: explicit profile approval saves reviewed details and preserves the pre-existing mission",
+    );
+
+    const savedBeforeSetup = structuredClone(state.orgs[0]);
+    const claimsBeforeSetup = state.claims;
+    const callsBeforeSetup = state.payloads.length;
+    for (const doc of setupEvidence) {
+      tables.documents.push(doc.record);
+      objects.set(`simple-grant-documents/${doc.record.storage_path}`, {
+        bytes: Buffer.from(doc.bytes),
+        type: doc.mime_type,
+        created_at: new Date().toISOString(),
+      });
+    }
+    await page.goto(`${site}/?view=organisation&org=${orgId}`);
+    await page
+      .getByRole("button", { name: "Set up for grants", exact: true })
+      .click();
+    const wizard = page.getByRole("dialog");
+    await expect(wizard).toHaveAccessibleName(
+      "Set up your organisation for grants",
+    );
+    await expect(
+      wizard.getByRole("checkbox", { name: "Budget.xlsx", exact: true }),
+    ).toHaveCount(0);
+    for (const { name } of setupSourceFacts)
+      await wizard.getByRole("checkbox", { name, exact: true }).check();
+    await wizard
+      .getByRole("button", { name: "Analyse pending sources" })
+      .click();
+    await expect(wizard).toHaveAccessibleName("Review grant setup answers", {
+      timeout: 30000,
+    });
+    const legalName = wizard.getByRole("group", {
+      name: "What is your registered legal name?",
+      exact: true,
+    });
+    await expect(
+      legalName.getByText("Sources disagree. Which answer applies?"),
+    ).toBeVisible();
+    for (const { quote } of setupSourceFacts)
+      await expect(legalName.getByText(quote, { exact: true })).toBeVisible();
+    await expect(
+      legalName
+        .locator(".grant-setup-alternative")
+        .filter({ hasText: setupSourceFacts[1].value })
+        .getByText(/Suggested by the second review/),
+    ).toBeVisible();
+    await expect(legalName.getByRole("textbox")).toHaveValue("");
+    await expect(
+      wizard.getByRole("button", { name: "Save reviewed answers" }),
+    ).toBeDisabled();
+    assert.equal(state.orgWrites, 1);
+    assert.deepEqual(state.orgs[0], savedBeforeSetup);
+    assert.equal(state.claims, claimsBeforeSetup + 3);
+    assert.equal(state.payloads.length, callsBeforeSetup + 3);
+    assert.deepEqual(state.setupEvents, [
+      ...setupSourceFacts.flatMap(({ id }) => [
+        ["queued", "setup-source", [id]],
+        ["completed", "setup-source", [id]],
+      ]),
+      ["queued", "setup-conflicts", []],
+      ["completed", "setup-conflicts", []],
+    ]);
+    const [firstSource, secondSource, conflict] = state.payloads
+      .slice(callsBeforeSetup)
+      .map(({ body }) => JSON.stringify(body.contents));
+    for (const [index, source] of [firstSource, secondSource].entries()) {
+      assert.ok(source.includes(setupSourceFacts[index].quote));
+      assert.ok(source.includes(setupSourceFacts[index].remainder));
+      assert.ok(!source.includes(setupSourceFacts[1 - index].quote));
+    }
+    for (const { name, quote, remainder } of setupSourceFacts) {
+      assert.ok(conflict.includes(quote));
+      assert.ok(!conflict.includes(name));
+      assert.ok(!conflict.includes(remainder));
+    }
+    assert.ok(!conflict.includes("inlineData"));
+    console.log(
+      "PASS: packaged grant setup queues each original after the preceding result, compares excerpts only, and leaves conflicting answers unsaved for review",
     );
   }
   const badId = "6589400b-9984-4d38-95d0-606f738b1430";

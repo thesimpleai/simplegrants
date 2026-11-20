@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
 import type { ProfileReviewCheckpoint } from "../lib/contracts";
+import GrantSetupWizard from "../components/GrantSetupWizard";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
 import { validateProfileDates } from "../lib/profile-dates";
 import { mergeReviewedProfile } from "../lib/profile-merge";
@@ -106,6 +107,7 @@ export default function OrganisationPage() {
   const app = useApp();
   const org = app.org;
   const [wizard, setWizard] = useState(false);
+  const [grantSetupOpen, setGrantSetupOpen] = useState(false);
   const [step, setStep] = useState<"sources" | "review">("sources");
   const [history, setHistory] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -140,6 +142,7 @@ export default function OrganisationPage() {
     profileReview.current = null;
     setFrequency(org?.notification_frequency ?? "weekly");
     setWizard(false);
+    setGrantSetupOpen(false);
     setError("");
     setUploadReport(null);
     setEditingExpiry(null);
@@ -613,7 +616,14 @@ export default function OrganisationPage() {
                 />
               </div>
               <div className="section-actions">
-                <button className="button primary" onClick={openWizard}>
+                <button
+                  className="button primary"
+                  onClick={() => setGrantSetupOpen(true)}
+                >
+                  <Sparkles size={18} />
+                  Set up for grants
+                </button>
+                <button className="button secondary" onClick={openWizard}>
                   <Sparkles size={18} />
                   Update with AI
                 </button>
@@ -648,16 +658,15 @@ export default function OrganisationPage() {
                 <span className="icon-tile">
                   <Sparkles size={23} />
                 </span>
-                <h2>Tell your story once.</h2>
+                <h2>Build reusable grant answers</h2>
                 <p>
-                  Upload your registration documents and paste in your
-                  organisation’s history. Your assistant will prepare the
-                  details for you.
+                  Work through registration, services, governance and other
+                  common grant questions using sources already in your library.
                 </p>
                 <ol className="simple-steps">
-                  <li>Read your source documents</li>
-                  <li>Check facts against the originals</li>
-                  <li>Correct differences for your review</li>
+                  <li>Find answers one source at a time</li>
+                  <li>Compare any disagreements</li>
+                  <li>Review answers and see what evidence is missing</li>
                 </ol>
                 <p className="small muted">
                   You always have the final say. Nothing is approved
@@ -918,6 +927,13 @@ export default function OrganisationPage() {
             </button>
           </form>
         </Modal>
+      )}
+      {grantSetupOpen && org && (
+        <GrantSetupWizard
+          key={org.id}
+          organisation={org}
+          onClose={() => setGrantSetupOpen(false)}
+        />
       )}
       {wizard && (
         <Modal

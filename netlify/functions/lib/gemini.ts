@@ -503,6 +503,7 @@ export async function documentParts(
   orgId: string,
   ids: string[],
   budget?: AIRequestBudget,
+  allowsCategory?: (category: string) => boolean,
 ): Promise<{
   parts: Part[];
   documents: DocumentRecord[];
@@ -533,6 +534,11 @@ export async function documentParts(
     budget?.assert();
     if (!doc.storage_path.startsWith(`${orgId}/`))
       throw new HttpError(403, "The document is outside this organisation.");
+    if (allowsCategory && !allowsCategory(doc.category))
+      throw new HttpError(
+        422,
+        "Choose a registration, ACNC or other authorised source. Insurance needs separate confirmation. Keep financial statements and audits in the document library and use a redacted excerpt or enter a reviewed summary manually.",
+      );
     if (
       doc.size_bytes > MAX_DOCUMENT_BYTES ||
       total + doc.size_bytes > MAX_AI_DOCUMENT_BYTES

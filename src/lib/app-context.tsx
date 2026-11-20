@@ -743,10 +743,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
           (item.suggestion === undefined ||
             typeof item.suggestion === "string"),
       );
-    const savedFiles =
-      original.action === "profile"
-        ? " Your uploaded documents are still saved in your library."
-        : "";
+    const savedFiles = ["profile", "setup-source", "setup-conflicts"].includes(
+      original.action,
+    )
+      ? " Your uploaded documents are still saved in your library."
+      : "";
     function ensureCurrent() {
       if (
         !targetOrg ||
@@ -1124,9 +1125,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
             ? isRecord(result.report)
             : original.action === "prepare-application"
               ? isApplicationResearch(result.applicationResearch)
-              : original.action === "ask"
-                ? typeof result.answer === "string"
-                : false;
+              : original.action === "setup-source"
+                ? Array.isArray(result.setupSuggestions)
+                : original.action === "setup-conflicts"
+                  ? Array.isArray(result.setupConflicts)
+                  : original.action === "ask"
+                    ? typeof result.answer === "string"
+                    : false;
     if (!valid) throw failure();
     ensureCurrent();
     if (

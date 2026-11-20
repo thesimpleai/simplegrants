@@ -8,6 +8,11 @@ import {
   documentExpiryStatus,
   draftEvidenceBlockers,
 } from "../../../src/lib/grant-requirements";
+import {
+  isSetupQuestionKey,
+  readSetupAnswers,
+  setupQuestionnaire,
+} from "../../../src/lib/setup-questionnaire";
 
 export class HttpError extends Error {
   constructor(
@@ -239,18 +244,59 @@ export function stripSensitive<T>(value: T): T {
     ) as T;
   return value;
 }
-/** Candidate quotes and unresolved review findings remain provenance for a
- * human. They must never be relabelled as approved grant-application facts. */
+/** Review provenance and setup answers stay out of general profile context. */
 export function approvedProfileFacts(
   profile: Profile,
 ): Record<string, unknown> {
   return stripSensitive(
     Object.fromEntries(
       Object.entries(profile).filter(
-        ([field]) => !["source_evidence", "review_notes"].includes(field),
+        ([field]) =>
+          ![
+            "source_evidence",
+            "review_notes",
+            "grant_setup",
+            "reviewed_grant_answers",
+          ].includes(field),
       ),
     ),
   );
+}
+export function approvedApplicationProfileFacts(
+  profile: Profile,
+): Record<string, unknown> {
+  const facts = approvedProfileFacts(profile);
+  const setup = profile.grant_setup;
+  if (
+    !setup ||
+    typeof setup !== "object" ||
+    !("version" in setup) ||
+    setup.version !== 1 ||
+    !("answers" in setup)
+  )
+    return facts;
+
+  const answers = readSetupAnswers(setup.answers);
+  const unresolved = new Set(
+    "unresolved" in setup && Array.isArray(setup.unresolved)
+      ? setup.unresolved.filter(isSetupQuestionKey)
+      : [],
+  );
+  const reviewedAnswers = setupQuestionnaire.flatMap(
+    ({ key, label, profileField }) => {
+      if (unresolved.has(key)) {
+        if (profileField) delete facts[profileField];
+        return [];
+      }
+      const answer = answers[key];
+      return answer?.status === "confirmed"
+        ? [{ question: label, answer: answer.value }]
+        : [];
+    },
+  );
+  return reviewedAnswers.length
+    ? { ...facts, reviewed_grant_answers: reviewedAnswers }
+    : facts;
 }
 /** Prior AI research and workflow confirmations are not project evidence. */
 export function projectFactsForAI(
