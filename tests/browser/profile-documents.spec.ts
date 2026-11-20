@@ -197,6 +197,121 @@ async function openProfile(
     .fill(text);
 }
 
+test("grant setup retries only failed sources, keeps conflicting evidence and waits for an explicit choice", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const first = {
+    questionKey: "legal_name",
+    value: "Creekside Network Inc",
+    quote: "Registered name: Creekside Network Inc",
+    sourceLabel: initialDocuments[0].name,
+    documentId: initialDocuments[0].id,
+    quoteVerified: true,
+  };
+  const second = {
+    questionKey: "legal_name",
+    value: "Creekside Community Association",
+    quote: "Legal entity: Creekside Community Association",
+    sourceLabel: initialDocuments[1].name,
+    documentId: initialDocuments[1].id,
+    quoteVerified: true,
+  };
+  let attempt = 0;
+  await page.route("**/api/ai", async (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.action === "setup-conflicts") {
+      return route.fulfill({
+        json: {
+          setupConflicts: [
+            {
+              questionKey: "legal_name",
+              alternatives: [first, second],
+              recommendedAlternative: 0,
+              note: "Check the incorporation certificate against the annual report.",
+            },
+          ],
+        },
+      });
+    }
+    if (body.documentIds[0] === first.documentId)
+      return route.fulfill({ json: { setupSuggestions: [first] } });
+    if (attempt++ === 0)
+      return route.fulfill({ status: 504, json: { code: "SG_AI_TIMEOUT" } });
+    return route.fulfill({ json: { setupSuggestions: [second] } });
+  });
+
+  await page.goto("/?view=organisation");
+  await page.getByRole("button", { name: "Set up for grants" }).click();
+  await page.getByRole("checkbox", { name: first.sourceLabel }).check();
+  await page.getByRole("checkbox", { name: second.sourceLabel }).check();
+  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Review grant setup answers" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Some sources still need attention"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back to sources" }).click();
+  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+
+  const review = page.getByRole("dialog", {
+    name: "Review grant setup answers",
+  });
+  await expect(review.getByText(first.quote)).toBeVisible();
+  await expect(review.getByText(second.quote)).toBeVisible();
+  await expect(
+    review.getByText("Documents that could fill gaps"),
+  ).toBeVisible();
+  await expect(
+    review.getByRole("textbox", {
+      name: "What is your registered legal name?",
+    }),
+  ).toHaveValue("");
+  expect(
+    state.ai.map(({ action, documentIds }) => [action, documentIds]),
+  ).toEqual([
+    ["setup-source", [first.documentId]],
+    ["setup-source", [second.documentId]],
+    ["setup-source", [second.documentId]],
+    ["setup-conflicts", []],
+  ]);
+  expect(state.updates).toHaveLength(0);
+  await review
+    .getByRole("checkbox", { name: /I’ve checked the answers/ })
+    .check();
+  await review.getByRole("button", { name: "Save reviewed answers" }).click();
+  await expect(review).toHaveCount(0);
+  expect(state.organisations[0].profile.grant_setup).toMatchObject({
+    unresolved: ["legal_name"],
+    evidence: [first, second],
+  });
+  expect(
+    (state.organisations[0].profile.grant_setup as { answers: object }).answers,
+  ).not.toHaveProperty("legal_name");
+
+  await page.getByRole("button", { name: "Set up for grants" }).click();
+  await page.getByRole("button", { name: "Review or answer manually" }).click();
+  await review
+    .locator(".grant-setup-alternative")
+    .filter({ hasText: first.value })
+    .getByRole("button", { name: "Use this answer" })
+    .click();
+  await review
+    .getByRole("checkbox", { name: /I’ve checked the answers/ })
+    .check();
+  await review.getByRole("button", { name: "Save reviewed answers" }).click();
+  await expect(review).toHaveCount(0);
+  expect(state.organisations[0].profile.grant_setup).toMatchObject({
+    unresolved: [],
+    answers: {
+      legal_name: { status: "confirmed", value: first.value, sources: [first] },
+    },
+    evidence: [first, second],
+  });
+});
+
 test("expanded details preserve approved values, require approval and survive a saved profile round trip", async ({
   page,
 }) => {

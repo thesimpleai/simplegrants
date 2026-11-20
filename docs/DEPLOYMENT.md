@@ -105,6 +105,10 @@ Weekly and monthly preferences are per organisation. `grant-digest` runs hourly 
 
 ## Document conversion and profile preparation
 
+**My organisation → Set up for grants** provides a reusable questionnaire for an organisation's legal details, purpose, governance, insurance, finances and track record. It runs one authenticated background job per selected document or pasted excerpt. The review shows directly supported answers with excerpts. Exact text matches are checked for text and converted files. Quotes from visual sources are labelled for the user to check against the original.
+
+The conflict check sends short competing excerpts in a separate request and keeps all options available for review. A user can choose an answer, enter one manually, or leave the question open and see document suggestions. Saving persists confirmed answers and private evidence in the existing organisation profile. Only confirmed answers are supplied to application assistance. Use each application's own fields for project-specific facts and requirements. The previous profile review is available from **Update with AI**.
+
 Round-4 drafting uses a compact preflight response and a 6,144-token output ceiling. Rule enums are expanded back to the existing signed requirement contract; optional/conditional rules and final evidence/version checks are unchanged. Output-limit logs include safe token/thinking counts and model version rather than response text. The application editor's **Supporting documents for this draft** selection sends the chosen originals to both model phases (up to eight documents/15 MiB); choices persist with the application and no file is preselected automatically.
 
 Profile verification can recover omitted source facts only with field-specific quotes. Correction omissions without findings retain the extracted value as an explicitly unconfirmed draft for human review; disputed or generally challenged values are not automatically restored. Missing facts and all verification findings stay visible. Entity types share a fixed normalized option list across server and browser.

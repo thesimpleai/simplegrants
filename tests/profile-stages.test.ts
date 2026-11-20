@@ -385,6 +385,282 @@ describe("separate authenticated profile stages", () => {
   });
 });
 
+describe("source-based grant setup", () => {
+  const suggestionText = {
+    questionKey: "legal_name",
+    textValue: "Community Club Incorporated",
+    quote: "Name: Community Club Incorporated",
+  };
+  function setup(extra: Record<string, unknown> = {}) {
+    return call({ action: "setup-source", text: "", ...extra });
+  }
+
+  it("returns only evidenced, typed suggestions and never forwards visible credentials from pasted text", async () => {
+    const legalName = suggestionText.quote;
+    const hours =
+      "From 1 July 2024 to 30 June 2025, 1,200 volunteer hours were recorded.";
+    const financialCanary = "Bank account number: 123456789";
+    const unrelated = "The organisation runs weekly community workshops.";
+    const dgrStatus =
+      "The organisation is not endorsed as a deductible gift recipient.";
+    const dated = {
+      value: 1200,
+      unit: "hours",
+      periodStart: "2024-07-01",
+      periodEnd: "2025-06-30",
+    };
+    model({
+      suggestions: [
+        suggestionText,
+        {
+          questionKey: "annual_volunteer_hours",
+          metricValue: dated,
+          quote: hours,
+        },
+        {
+          questionKey: "annual_volunteer_hours",
+          metricValue: { ...dated, value: 100 },
+          quote: hours,
+        },
+        {
+          questionKey: "annual_volunteer_hours",
+          metricValue: { ...dated, periodStart: "2024-07-02" },
+          quote: hours,
+        },
+        {
+          questionKey: "mission",
+          textValue: "Invented mission",
+          quote: "Invented mission",
+        },
+        {
+          questionKey: "financial_controls",
+          textValue: financialCanary,
+          quote: financialCanary,
+        },
+        {
+          questionKey: "acnc_registered",
+          booleanValue: true,
+          quote: unrelated,
+        },
+        { questionKey: "dgr_endorsed", booleanValue: true, quote: dgrStatus },
+        { questionKey: "dgr_endorsed", booleanValue: false, quote: dgrStatus },
+      ],
+    });
+    const response = await setup({
+      documentIds: [],
+      text: `${legalName}\n${hours}\n${financialCanary}\n${unrelated}\n${dgrStatus}`,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      setupSuggestions: [
+        {
+          questionKey: "legal_name",
+          value: suggestionText.textValue,
+          quote: legalName,
+          sourceLabel: "Pasted information",
+          quoteVerified: true,
+        },
+        {
+          questionKey: "annual_volunteer_hours",
+          value: dated,
+          quote: hours,
+          sourceLabel: "Pasted information",
+          quoteVerified: true,
+        },
+        {
+          questionKey: "dgr_endorsed",
+          value: false,
+          quote: dgrStatus,
+          sourceLabel: "Pasted information",
+          quoteVerified: true,
+        },
+      ],
+    });
+    const prompt = JSON.stringify(
+      mocks.generateContent.mock.calls[0][0].contents,
+    );
+    expect(prompt).toContain(legalName);
+    expect(prompt).toContain("[redacted]");
+    expect(prompt).not.toContain("123456789");
+    expect(prompt).not.toContain("STALE-NOT-SOURCE");
+    expect(mocks.rpc).toHaveBeenCalledOnce();
+    expect(mocks.rpc).toHaveBeenCalledWith("claim_ai_request", {
+      p_org_id: orgId,
+      p_action: "profile",
+    });
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it("checks one selected document against its own bytes and stamps provenance from the tenant row", async () => {
+    const filename = `${docId}.txt`;
+    fileText = "Name:\nCommunity Club Incorporated\nEnd of declaration.";
+    model({ suggestions: [{ ...suggestionText, locator: "Declaration" }] });
+    const response = await setup();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      setupSuggestions: [
+        {
+          questionKey: "legal_name",
+          value: suggestionText.textValue,
+          quote: "Name:\nCommunity Club Incorporated",
+          sourceLabel: filename,
+          locator: "Declaration",
+          documentId: docId,
+          quoteVerified: true,
+        },
+      ],
+    });
+    expect(mocks.download).toHaveBeenCalledOnce();
+    expect(mocks.generateContent).toHaveBeenCalledOnce();
+  });
+
+  it("labels visual evidence as not locally text-checked", async () => {
+    documents = [
+      { ...document(), name: "register.pdf", mime_type: "application/pdf" },
+    ];
+    model({ suggestions: [{ ...suggestionText, locator: "Page 1" }] });
+    const response = await setup();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      setupSuggestions: [
+        {
+          questionKey: "legal_name",
+          value: suggestionText.textValue,
+          quote: suggestionText.quote,
+          sourceLabel: "register.pdf",
+          locator: "Page 1",
+          documentId: docId,
+          quoteVerified: false,
+        },
+      ],
+    });
+    expect(
+      mocks.generateContent.mock.calls[0][0].contents[0].parts[2].inlineData
+        .mimeType,
+    ).toBe("application/pdf");
+  });
+
+  it.each([
+    { category: "financial_statement", includeInsurance: true },
+    { category: "audit_report", includeInsurance: false },
+    { category: "insurance", includeInsurance: false },
+  ])(
+    "does not download or send $category sources without authorization",
+    async ({ category, includeInsurance }) => {
+      documents = [{ ...document(), category }];
+      expect((await setup({ includeInsurance })).status).toBe(422);
+      expect(mocks.download).not.toHaveBeenCalled();
+      expect(mocks.generateContent).not.toHaveBeenCalled();
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires one source with an owned storage path and explicit insurance consent", async () => {
+    expect((await setup({ text: "second source" })).status).toBe(422);
+    expect((await setup({ documentIds: [docId, secondId] })).status).toBe(422);
+    documents = [
+      { ...document(), storage_path: `${secondId}/private-note.txt` },
+    ];
+    expect((await setup()).status).toBe(403);
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    documents = [{ ...document(), category: "insurance" }];
+    fileText = "Public liability insurance expires on 30 June 2027.";
+    model({
+      suggestions: [
+        {
+          questionKey: "insurance_expiry",
+          textValue: "2027-06-30",
+          quote: fileText,
+        },
+      ],
+    });
+    const response = await setup({ includeInsurance: true });
+    expect(response.status).toBe(200);
+    expect((await response.json()).setupSuggestions[0].value).toBe(
+      "2027-06-30",
+    );
+  });
+
+  it("checks only submitted conflict excerpts and preserves all alternatives without resolving uncertain conflicts", async () => {
+    const first = {
+      value: "Old Club",
+      quote: "Previous entity name: Old Club",
+      sourceLabel: "Original registration",
+      documentId: docId,
+      quoteVerified: true,
+    };
+    const second = {
+      value: "New Club",
+      quote: "The legal name is New Club",
+      sourceLabel: "Updated registration",
+      documentId: secondId,
+      quoteVerified: true,
+    };
+    const scopeA = {
+      value: "Metro",
+      quote: "Metro offices are open",
+      sourceLabel: "Annual summary",
+    };
+    const scopeB = {
+      value: "Regional",
+      quote: "Regional offices opened",
+      sourceLabel: "Program review",
+    };
+    model({
+      reviews: [
+        {
+          questionKey: "legal_name",
+          basis: "direct_evidence",
+          recommendedAlternative: 1,
+        },
+        {
+          questionKey: "description",
+          basis: "unresolved",
+          recommendedAlternative: 1,
+        },
+        {
+          questionKey: "mission",
+          basis: "direct_evidence",
+          recommendedAlternative: 0,
+        },
+      ],
+    });
+    const response = await setup({
+      action: "setup-conflicts",
+      documentIds: [],
+      conflicts: [
+        { questionKey: "legal_name", candidates: [first, second] },
+        { questionKey: "description", candidates: [scopeA, scopeB] },
+      ],
+    });
+    expect(response.status).toBe(200);
+    const { setupConflicts } = await response.json();
+    expect(setupConflicts).toHaveLength(2);
+    expect(setupConflicts[0]).toMatchObject({
+      questionKey: "legal_name",
+      recommendedAlternative: 1,
+      alternatives: [first, second],
+    });
+    expect(setupConflicts[1]).toMatchObject({
+      questionKey: "description",
+      alternatives: [scopeA, scopeB],
+    });
+    expect(setupConflicts[1]).not.toHaveProperty("recommendedAlternative");
+    const prompt = JSON.stringify(
+      mocks.generateContent.mock.calls[0][0].contents,
+    );
+    expect(prompt).toContain("The legal name is New Club");
+    expect(prompt).not.toContain("Updated registration");
+    expect(prompt).not.toContain(docId);
+    expect(prompt).not.toContain("STALE-NOT-SOURCE");
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledOnce();
+  });
+});
+
 describe("bounded AI failures", () => {
   it.each([
     {

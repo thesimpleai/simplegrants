@@ -1,4 +1,5 @@
 import type { User } from "@supabase/supabase-js";
+import type { SetupQuestionKey, SetupSuggestion } from "./setup-questionnaire";
 import type {
   AIResult,
   Application,
@@ -59,6 +60,11 @@ export interface AppContextValue {
       applicationId?: string;
       projectId?: string;
       message?: string;
+      includeInsurance?: boolean;
+      conflicts?: {
+        questionKey: SetupQuestionKey;
+        candidates: Omit<SetupSuggestion, "questionKey">[];
+      }[];
     },
     onProgress?: (stage: ProfileStage) => void,
     profileReview?: { current: ProfileReviewCheckpoint | null },

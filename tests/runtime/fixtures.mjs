@@ -5,6 +5,25 @@ export const grantId = "7b766b0e-4e32-4e3e-b0a5-75b1ee07b59e";
 export const appId = "47d7c7ee-0452-44e5-a8db-fde758371aed";
 export const sourceText =
   "Runtime Community Association is a fictional incorporated association based in Victoria. It serves local families through community gardening workshops. It is not a registered charity and no ABN is supplied. Community served: local families in Victoria. 服務維多利亞州家庭。";
+export const setupSourceFacts = [
+  {
+    id: "c85bf323-77f7-4cde-b50e-a51813a0f2d0",
+    name: "Setup history.txt",
+    mime_type: "text/plain",
+    value: "Runtime Garden Club Incorporated",
+    quote: "Earlier working name: Runtime Garden Club Incorporated.",
+    remainder: "The original history has a separate gardening timetable.",
+  },
+  {
+    id: "071cc6b1-24c9-493b-b3b9-0fc2321275ad",
+    name: "Setup charter.docx",
+    mime_type:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    value: "Runtime Community Association Incorporated",
+    quote: "Registered legal name: Runtime Community Association Incorporated.",
+    remainder: "The original charter has a separate records appendix.",
+  },
+];
 export const profile = {
   name: "Runtime Community Association",
   type: "Incorporated association",
@@ -63,17 +82,19 @@ export const application = {
     source_document_ids: [],
   },
 };
-const docx = zipSync(
-  Object.fromEntries(
-    Object.entries({
-      "[Content_Types].xml":
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
-      "_rels/.rels":
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
-      "word/document.xml": `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${sourceText}</w:t></w:r></w:p></w:body></w:document>`,
-    }).map(([path, text]) => [path, strToU8(text)]),
-  ),
-);
+function wordFile(source) {
+  return zipSync(
+    Object.fromEntries(
+      Object.entries({
+        "[Content_Types].xml":
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        "_rels/.rels":
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+        "word/document.xml": `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${source}</w:t></w:r></w:p></w:body></w:document>`,
+      }).map(([path, text]) => [path, strToU8(text)]),
+    ),
+  );
+}
 const xlsx = zipSync(
   Object.fromEntries(
     Object.entries({
@@ -155,7 +176,7 @@ export const evidence = [
     name: "Charter.docx",
     mime_type:
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    bytes: docx,
+    bytes: wordFile(sourceText),
   },
   {
     id: "e34fd8d7-c910-4b92-895f-eb1ce4fad72f",
@@ -164,21 +185,33 @@ export const evidence = [
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     bytes: xlsx,
   },
-].map((doc) => ({
-  ...doc,
-  record: {
-    id: doc.id,
-    org_id: orgId,
-    name: doc.name,
-    mime_type: doc.mime_type,
-    size_bytes: doc.bytes.length,
-    category: doc.name === "Budget.xlsx" ? "financial_statement" : "other",
-    storage_path: `${orgId}/${doc.id}/${doc.name}`,
-    verified: false,
-    created_at: "2026-11-01T00:00:00Z",
-    expires_on: null,
-  },
-}));
+].map(libraryDocument);
+
+export const setupEvidence = setupSourceFacts.map((source) => {
+  const text = `${source.quote} ${source.remainder}`;
+  return libraryDocument({
+    ...source,
+    bytes: source.mime_type === "text/plain" ? strToU8(text) : wordFile(text),
+  });
+});
+
+function libraryDocument(doc) {
+  return {
+    ...doc,
+    record: {
+      id: doc.id,
+      org_id: orgId,
+      name: doc.name,
+      mime_type: doc.mime_type,
+      size_bytes: doc.bytes.length,
+      category: doc.name === "Budget.xlsx" ? "financial_statement" : "other",
+      storage_path: `${orgId}/${doc.id}/${doc.name}`,
+      verified: false,
+      created_at: "2026-11-01T00:00:00Z",
+      expires_on: null,
+    },
+  };
+}
 export function providerReply(body) {
   const properties = body.generationConfig?.responseSchema?.properties;
   let text, groundingMetadata;
@@ -207,7 +240,41 @@ export function providerReply(body) {
       recovered_profile: {},
       evidence: [],
     });
-  else if (properties?.documents)
+  else if (properties?.suggestions) {
+    const source = setupSourceFacts.find(({ name }) =>
+      body.contents[0].parts.some(({ text }) =>
+        text?.startsWith(`SOURCE DOCUMENT: ${name}.`),
+      ),
+    );
+    if (!source) throw Error("Unexpected setup source in runtime test");
+    text = JSON.stringify({
+      suggestions: [
+        {
+          questionKey: "legal_name",
+          textValue: source.value,
+          quote: source.quote,
+        },
+      ],
+    });
+  } else if (properties?.reviews) {
+    const [conflict] = JSON.parse(
+      body.contents[0].parts[0].text.split("Conflict excerpts: ")[1],
+    );
+    const recommendedAlternative = conflict.alternatives.findIndex(
+      ({ value }) => value === setupSourceFacts[1].value,
+    );
+    if (recommendedAlternative < 0)
+      throw Error("Missing registered name in runtime conflict test");
+    text = JSON.stringify({
+      reviews: [
+        {
+          questionKey: "legal_name",
+          basis: "direct_evidence",
+          recommendedAlternative,
+        },
+      ],
+    });
+  } else if (properties?.documents)
     text = JSON.stringify({ documents: [], information: [] });
   else if (properties?.sections)
     text = JSON.stringify({
