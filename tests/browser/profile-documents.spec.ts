@@ -1769,6 +1769,59 @@ test("a prepared profile autosaves its review and resumes after reload without a
   ).toBeVisible();
 });
 
+test("an unread profile draft cannot be discarded from a newly prepared review", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const key = `${orgId}:profile`;
+  const saved = {
+    updatedAt: Date.now(),
+    data: {
+      version: 1,
+      profile: { ...finalResult.profile, name: "Previously saved profile" },
+      focusText: "Community",
+      result: finalResult,
+      selected: [initialDocuments[0].id],
+      includeInsurance: false,
+    },
+  };
+  state.setupDrafts.set(key, saved);
+  let draftStorageAvailable = false;
+  await page.route("**/api/setup-review-drafts?*", async (route) => {
+    if (route.request().method() === "GET" && !draftStorageAvailable) {
+      await route.fulfill({ status: 503, json: { error: "Unavailable" } });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.route("**/api/ai", (route) =>
+    route.fulfill({ json: stageResult(route.request().postDataJSON()) }),
+  );
+
+  await page.goto("/?view=organisation");
+  await expect(
+    page.getByRole("button", { name: "Retry loading profile draft" }),
+  ).toBeVisible();
+  draftStorageAvailable = true;
+  await page
+    .getByRole("button", { name: "Update with AI", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  const review = page.getByRole("dialog", {
+    name: "Review your organisation details",
+  });
+  await expect(
+    review.getByText(/this draft couldn’t be saved for later/i),
+  ).toBeVisible();
+  await expect(
+    review.getByRole("button", { name: "Discard draft and start over" }),
+  ).toHaveCount(0);
+  expect(state.setupDrafts.get(key)).toEqual(saved);
+  expect(state.setupDraftRequests.map(({ method }) => method)).toEqual(["GET"]);
+});
+
 for (const flow of [
   {
     kind: "grant-setup",

@@ -268,6 +268,7 @@ export default function OrganisationPage() {
         if (currentDraft.current?.scope === draftScope && stored) return;
         const review = stored && readPendingProfileReview(stored.data);
         if (stored && !review) {
+          checkedDraftScope.current = "";
           setFailedDraftScope(draftScope);
           return;
         }
@@ -283,7 +284,10 @@ export default function OrganisationPage() {
         setProfileDraft(entry);
       })
       .catch(() => {
-        if (active) setFailedDraftScope(draftScope);
+        if (active) {
+          checkedDraftScope.current = "";
+          setFailedDraftScope(draftScope);
+        }
       })
       .finally(() => {
         if (active) setLoadedDraftScope(draftScope);
@@ -532,6 +536,7 @@ export default function OrganisationPage() {
       !result ||
       !draftOrgId ||
       !draftActorId ||
+      checkedDraftScope.current !== draftScope ||
       discardingDraftScopes.current.has(draftScope)
     )
       return;
@@ -1690,18 +1695,20 @@ export default function OrganisationPage() {
                 </span>
               </label>
               <div className="modal-footer">
-                {result && draftScope && (
-                  <button
-                    className="button secondary"
-                    disabled={!!busy}
-                    onClick={() => {
-                      setError("");
-                      setConfirmDiscardProfile(true);
-                    }}
-                  >
-                    Discard draft and start over
-                  </button>
-                )}
+                {result &&
+                  draftScope &&
+                  checkedDraftScope.current === draftScope && (
+                    <button
+                      className="button secondary"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setError("");
+                        setConfirmDiscardProfile(true);
+                      }}
+                    >
+                      Discard draft and start over
+                    </button>
+                  )}
                 <button
                   className="button secondary"
                   disabled={!!busy}
