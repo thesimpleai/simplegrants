@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AIResult, DocumentRecord, Organisation } from "../types";
-import { useApp } from "../lib/app-context";
+import { AIRequestError, useApp } from "../lib/app-context";
 import { MAX_AI_DOCUMENTS } from "../lib/document-formats";
 import { isInsuranceCategory } from "../lib/grant-requirements";
 import {
@@ -41,8 +41,47 @@ type ConflictReview = Pick<
   "note" | "recommendedAlternative"
 >;
 type ConflictReviews = Partial<Record<SetupQuestionKey, ConflictReview>>;
+type SetupGroups = ReturnType<typeof aggregateSetupEvidence>;
 
 const sections = [...new Set(setupQuestionnaire.map(({ section }) => section))];
+const CONFLICT_CHECK_BATCH_SIZE = 4;
+
+function conflictChecks(groups: SetupGroups) {
+  return setupQuestionnaire.flatMap(({ key }) => {
+    const group = groups[key];
+    if (!group?.hasConflict || group.alternatives.length > 4) return [];
+    return [
+      {
+        questionKey: key,
+        candidates: group.alternatives.map(({ suggestions }) => {
+          const [{ questionKey: _key, ...candidate }] = suggestions;
+          return candidate;
+        }),
+      },
+    ];
+  });
+}
+
+function reviewsForEvidence(
+  reviews: ConflictReviews,
+  before: SetupGroups,
+  after: SetupGroups,
+): ConflictReviews {
+  const previous = new Map(
+    conflictChecks(before).map(({ questionKey, candidates }) => [
+      questionKey,
+      JSON.stringify(candidates),
+    ]),
+  );
+  return Object.fromEntries(
+    conflictChecks(after).flatMap(({ questionKey, candidates }) =>
+      reviews[questionKey] &&
+      previous.get(questionKey) === JSON.stringify(candidates)
+        ? [[questionKey, reviews[questionKey]]]
+        : [],
+    ),
+  );
+}
 
 function draftSourceIds(value: unknown): string[] {
   return Array.isArray(value)
@@ -279,6 +318,7 @@ export default function GrantSetupWizard({
     ...Object.fromEntries(saved.unresolved.map((key) => [key, null])),
   }));
   const [reviews, setReviews] = useState<ConflictReviews>({});
+  const [conflictError, setConflictError] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [insurance, setInsurance] = useState(false);
   const [paste, setPaste] = useState("");
@@ -336,6 +376,9 @@ export default function GrantSetupWizard({
   }, [draftActor, organisation.id]);
 
   const groups = useMemo(() => aggregateSetupEvidence(evidence), [evidence]);
+  const pendingConflictChecks = conflictChecks(groups).filter(
+    ({ questionKey }) => !reviews[questionKey],
+  );
   const availableSources = app.data.documents.filter(
     (item) =>
       ["registration", "acnc", "other"].includes(item.category) ||
@@ -411,7 +454,7 @@ export default function GrantSetupWizard({
     setEdits(updates);
     setSaveConfirmed(false);
     setEvidence(next);
-    return { evidence: next, edits: updates };
+    return { evidence: next, edits: updates, before, after };
   }
 
   async function persistDraft(
@@ -466,47 +509,79 @@ export default function GrantSetupWizard({
     }
   }
 
-  async function checkConflicts(current: SetupSuggestion[]) {
-    const groups = aggregateSetupEvidence(current);
-    const conflicts = setupQuestionnaire.flatMap(({ key }) => {
-      const group = groups[key];
-      if (!group?.hasConflict || group.alternatives.length > 4) return [];
-      return [
-        {
-          questionKey: key,
-          candidates: group.alternatives.map(({ suggestions }) => {
-            const [{ questionKey: _key, ...candidate }] = suggestions;
-            return candidate;
-          }),
-        },
-      ];
-    });
-    const checked: ConflictReviews = {};
-    for (let start = 0; start < conflicts.length; start += 12) {
-      setProgress("Checking conflicting excerpts");
-      const batch = conflicts.slice(start, start + 12);
+  async function checkConflicts(
+    conflicts: ReturnType<typeof conflictChecks>,
+    existing: ConflictReviews,
+  ) {
+    if (!conflicts.length) return existing;
+    const checked = { ...existing };
+    setConflictError("");
+    setProgress("Checking conflicting excerpts");
+
+    async function checkBatch(batch: typeof conflicts): Promise<boolean> {
+      if (!active.current) return false;
       try {
         const result = await app.runAI({
           action: "setup-conflicts",
           conflicts: batch,
         });
-        if (!active.current) return;
+        if (!active.current) return false;
         for (const item of result.setupConflicts ?? []) {
-          if (batch.some(({ questionKey }) => questionKey === item.questionKey))
-            checked[item.questionKey] = {
-              note: item.note,
-              recommendedAlternative: item.recommendedAlternative,
-            };
+          const sent = batch.find(
+            ({ questionKey }) => questionKey === item.questionKey,
+          );
+          if (!sent) continue;
+          const index = item.recommendedAlternative;
+          checked[item.questionKey] = {
+            note: item.note,
+            recommendedAlternative:
+              index !== undefined &&
+              Number.isInteger(index) &&
+              index >= 0 &&
+              index < sent.candidates.length
+                ? index
+                : undefined,
+          };
         }
+        return true;
       } catch (e) {
-        if (!active.current) return;
-        setError(
-          `The excerpt check could not finish. You can compare every answer below. ${errorMessage(e)}`,
-        );
+        if (!active.current) return false;
+        if (e instanceof AIRequestError && e.code === "SG_AI_OUTPUT_LIMIT") {
+          if (batch.length === 1) return true;
+          const middle = Math.floor(batch.length / 2);
+          return (
+            (await checkBatch(batch.slice(0, middle))) &&
+            (await checkBatch(batch.slice(middle)))
+          );
+        }
+        setConflictError(errorMessage(e));
+        return false;
       }
+    }
+
+    for (
+      let start = 0;
+      start < conflicts.length;
+      start += CONFLICT_CHECK_BATCH_SIZE
+    ) {
+      if (
+        !(await checkBatch(
+          conflicts.slice(start, start + CONFLICT_CHECK_BATCH_SIZE),
+        ))
+      )
+        break;
     }
     if (active.current) setReviews(checked);
     return checked;
+  }
+
+  async function retryConflictChecks() {
+    if (progress || !pendingConflictChecks.length) return;
+    const checked = await checkConflicts(pendingConflictChecks, reviews);
+    if (!active.current) return;
+    if (Object.keys(checked).length > Object.keys(reviews).length)
+      await persistDraft(evidence, edits, completed, checked);
+    if (active.current) setProgress("");
   }
 
   async function analyseSources() {
@@ -525,9 +600,10 @@ export default function GrantSetupWizard({
     if (!sources.length) return;
     let current = { evidence, edits };
     let currentCompleted = completed;
+    let currentReviews = reviews;
     let finishedSource = false;
     setError("");
-    setReviews({});
+    setConflictError("");
     for (const [index, source] of sources.entries()) {
       const id = source.document?.id;
       const key = id ?? "paste";
@@ -547,12 +623,19 @@ export default function GrantSetupWizard({
         const suggestions = readGrantSetupEvidence(
           result.setupSuggestions,
         ).filter((suggestion) => suggestion.documentId === id);
-        current = recordNewEvidence(
+        const next = recordNewEvidence(
           current.evidence,
           suggestions,
           current.edits,
           id,
         );
+        current = next;
+        currentReviews = reviewsForEvidence(
+          currentReviews,
+          next.before,
+          next.after,
+        );
+        setReviews(currentReviews);
         if (id) {
           currentCompleted = [...currentCompleted, id];
           setCompleted(currentCompleted);
@@ -568,7 +651,7 @@ export default function GrantSetupWizard({
           current.evidence,
           current.edits,
           currentCompleted,
-          {},
+          currentReviews,
         );
         if (!active.current) return;
       } catch (e) {
@@ -579,19 +662,22 @@ export default function GrantSetupWizard({
         }));
       }
     }
-    const checked = await checkConflicts(current.evidence);
-    if (
-      active.current &&
-      finishedSource &&
-      checked &&
-      Object.keys(checked).length
-    )
-      await persistDraft(
-        current.evidence,
-        current.edits,
-        currentCompleted,
-        checked,
-      );
+    if (finishedSource) {
+      const pending = conflictChecks(
+        aggregateSetupEvidence(current.evidence),
+      ).filter(({ questionKey }) => !currentReviews[questionKey]);
+      const checked = await checkConflicts(pending, currentReviews);
+      if (
+        active.current &&
+        Object.keys(checked).length > Object.keys(currentReviews).length
+      )
+        await persistDraft(
+          current.evidence,
+          current.edits,
+          currentCompleted,
+          checked,
+        );
+    }
     if (active.current) {
       setReviewing(true);
       setProgress("");
@@ -852,6 +938,23 @@ export default function GrantSetupWizard({
               sources disagree, choose the applicable value, enter a correction,
               or leave the question open.
             </p>
+            {pendingConflictChecks.length > 0 && app.mode === "live" && (
+              <Notice>
+                <p>
+                  Some conflicting excerpts still need a check. You can retry
+                  the comparison or review the sources below yourself.
+                </p>
+                {conflictError && <p className="small">{conflictError}</p>}
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={!!progress}
+                  onClick={retryConflictChecks}
+                >
+                  Retry excerpt check
+                </button>
+              </Notice>
+            )}
             {documentRecommendations.length > 0 && (
               <Notice>
                 <strong>Documents that could fill gaps</strong>
