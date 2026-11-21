@@ -1326,7 +1326,7 @@ export default function OrganisationPage() {
       )}
       {grantSetupOpen && org && (
         <GrantSetupWizard
-          key={org.id}
+          key={`${org.id}:${app.user?.id ?? "demo"}`}
           organisation={org}
           onClose={() => setGrantSetupOpen(false)}
         />
