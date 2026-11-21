@@ -89,6 +89,13 @@ function draftSourceIds(value: unknown): string[] {
     : [];
 }
 
+function approvedEdits(saved: ReturnType<typeof readGrantSetup>): Edits {
+  return {
+    ...saved.answers,
+    ...Object.fromEntries(saved.unresolved.map((key) => [key, null])),
+  };
+}
+
 function draftEdits(value: unknown): Edits {
   const edits: Edits = readSetupAnswers(value);
   if (!value || typeof value !== "object") return edits;
@@ -313,10 +320,7 @@ export default function GrantSetupWizard({
   const app = useApp();
   const [saved] = useState(() => readGrantSetup(organisation.profile));
   const [evidence, setEvidence] = useState(saved.evidence);
-  const [edits, setEdits] = useState<Edits>(() => ({
-    ...saved.answers,
-    ...Object.fromEntries(saved.unresolved.map((key) => [key, null])),
-  }));
+  const [edits, setEdits] = useState<Edits>(() => approvedEdits(saved));
   const [reviews, setReviews] = useState<ConflictReviews>({});
   const [conflictError, setConflictError] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -335,8 +339,15 @@ export default function GrantSetupWizard({
   const [draftSaved, setDraftSaved] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
   const [draftError, setDraftError] = useState("");
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [discardError, setDiscardError] = useState("");
   const draftLoadFailed = useRef(false);
   const active = useRef(true);
+  const mayDiscardDraft =
+    !!draftActor &&
+    !loadingDraft &&
+    !draftLoadFailed.current &&
+    (draftSaved || draftDirty);
 
   useEffect(() => {
     active.current = true;
@@ -506,6 +517,40 @@ export default function GrantSetupWizard({
     if (active.current) {
       setProgress("");
       if (savedDraft) onClose();
+    }
+  }
+
+  async function discardDraft() {
+    if (!draftActor || !mayDiscardDraft || !discardOpen || progress) return;
+    setProgress("Discarding draft");
+    setDiscardError("");
+    try {
+      await removeSetupReviewDraft(organisation.id, draftActor, "grant-setup");
+      if (!active.current) return;
+      setEvidence(saved.evidence);
+      setEdits(approvedEdits(saved));
+      setReviews({});
+      setConflictError("");
+      setSelected([]);
+      setInsurance(false);
+      setPaste("");
+      setCompleted([]);
+      setAnalysedPaste("");
+      setSourceErrors({});
+      setReviewing(false);
+      setError("");
+      setSaveConfirmed(false);
+      setApproveProfile(false);
+      setDraftSaved(false);
+      setDraftDirty(false);
+      setDraftError("");
+      setDiscardOpen(false);
+      app.notify("Grant setup draft discarded.");
+    } catch {
+      if (active.current)
+        setDiscardError("Couldn’t discard your grant setup draft. Try again.");
+    } finally {
+      if (active.current) setProgress("");
     }
   }
 
@@ -771,6 +816,46 @@ export default function GrantSetupWizard({
     answerFor(setupQuestionnaire.find(({ key }) => key === "description")!)
       ?.status === "confirmed";
 
+  if (discardOpen) {
+    return (
+      <Modal
+        title="Discard grant setup draft?"
+        onClose={() => !progress && setDiscardOpen(false)}
+      >
+        <div className="stack">
+          <p>
+            This deletes your draft and returns you to source selection.
+            Approved organisation details and uploaded documents stay saved.
+          </p>
+          {discardError && (
+            <p className="form-error" role="alert">
+              {discardError}
+            </p>
+          )}
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="button secondary"
+              autoFocus
+              disabled={!!progress}
+              onClick={() => setDiscardOpen(false)}
+            >
+              Keep draft
+            </button>
+            <button
+              type="button"
+              className="button primary"
+              disabled={!!progress}
+              onClick={discardDraft}
+            >
+              {progress ? <Busy label={progress} /> : "Discard and start over"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal
       wide
@@ -794,10 +879,25 @@ export default function GrantSetupWizard({
             {draftError}
           </p>
         )}
-        {draftSaved && !draftDirty && !draftError && !progress && (
-          <p className="small muted" role="status">
-            Draft saved for later.
-          </p>
+        {mayDiscardDraft && (
+          <div className="section-actions">
+            {draftSaved && !draftDirty && !draftError && !progress && (
+              <p className="small muted" role="status">
+                Draft saved for later.
+              </p>
+            )}
+            <button
+              type="button"
+              className="button secondary"
+              disabled={!!progress}
+              onClick={() => {
+                setDiscardError("");
+                setDiscardOpen(true);
+              }}
+            >
+              Discard draft and start over
+            </button>
+          </div>
         )}
         {progress && (
           <p role="status">

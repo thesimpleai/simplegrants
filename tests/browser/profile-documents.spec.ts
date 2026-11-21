@@ -104,6 +104,7 @@ async function prepareDocuments(
     open: [] as { path: string; expires: number; options?: unknown }[],
     failUploadAt: 0,
     failUpdate: false,
+    failSetupDraftDelete: false,
   };
   await page.route("**/src/lib/supabase.ts*", (route) =>
     route.fulfill({
@@ -219,6 +220,11 @@ storage:{from:bucket=>({upload:async(path,file,options)=>{const response=await f
         return route.fulfill({ json: { updatedAt } });
       }
       case "DELETE":
+        if (state.failSetupDraftDelete)
+          return route.fulfill({
+            status: 503,
+            json: { error: "Draft storage unavailable" },
+          });
         state.setupDrafts.delete(key);
         return route.fulfill({ json: { removed: true } });
       default:
@@ -1762,3 +1768,250 @@ test("a prepared profile autosaves its review and resumes after reload without a
     page.getByRole("button", { name: "Update with AI" }),
   ).toBeVisible();
 });
+
+test("an unread profile draft cannot be discarded from a newly prepared review", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const key = `${orgId}:profile`;
+  const saved = {
+    updatedAt: Date.now(),
+    data: {
+      version: 1,
+      profile: { ...finalResult.profile, name: "Previously saved profile" },
+      focusText: "Community",
+      result: finalResult,
+      selected: [initialDocuments[0].id],
+      includeInsurance: false,
+    },
+  };
+  state.setupDrafts.set(key, saved);
+  let draftStorageAvailable = false;
+  await page.route("**/api/setup-review-drafts?*", async (route) => {
+    if (route.request().method() === "GET" && !draftStorageAvailable) {
+      await route.fulfill({ status: 503, json: { error: "Unavailable" } });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.route("**/api/ai", (route) =>
+    route.fulfill({ json: stageResult(route.request().postDataJSON()) }),
+  );
+
+  await page.goto("/?view=organisation");
+  await expect(
+    page.getByRole("button", { name: "Retry loading profile draft" }),
+  ).toBeVisible();
+  draftStorageAvailable = true;
+  await page
+    .getByRole("button", { name: "Update with AI", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Prepare my profile", exact: true })
+    .click();
+  const review = page.getByRole("dialog", {
+    name: "Review your organisation details",
+  });
+  await expect(
+    review.getByText(/this draft couldn’t be saved for later/i),
+  ).toBeVisible();
+  await expect(
+    review.getByRole("button", { name: "Discard draft and start over" }),
+  ).toHaveCount(0);
+  expect(state.setupDrafts.get(key)).toEqual(saved);
+  expect(state.setupDraftRequests.map(({ method }) => method)).toEqual(["GET"]);
+});
+
+for (const flow of [
+  {
+    kind: "grant-setup",
+    open: "Set up for grants",
+    review: "Review grant setup answers",
+    discard: "Discard grant setup draft?",
+    sources: "Set up your organisation for grants",
+    pastedText: "Paste a public or redacted excerpt",
+    analyse: "Analyse pending sources",
+    draftField: "What is your registered legal name?",
+  },
+  {
+    kind: "profile",
+    open: "Resume profile draft",
+    review: "Review your organisation details",
+    discard: "Discard profile draft?",
+    sources: "Let’s get to know your organisation",
+    pastedText: "Paste your organisation’s history or information",
+    analyse: "Prepare my profile",
+    draftField: "Organisation name",
+  },
+] as const) {
+  test(`discarding a ${flow.kind} review draft requires confirmation and preserves approved details and original documents`, async ({
+    page,
+  }) => {
+    const approvedProfile = {
+      name: "Test Community",
+      legal_name: "Test Community Incorporated",
+      mission: "Community education and support",
+      grant_setup: {
+        version: 1,
+        answers: {
+          mission: {
+            status: "confirmed",
+            value: "Community education and support",
+          },
+        },
+        evidence: [],
+        unresolved: [],
+      },
+    };
+    const state = await prepareDocuments(page, initialDocuments, {
+      profile: approvedProfile,
+      approved: true,
+    });
+    const approvedOrganisation = structuredClone(state.organisations[0]);
+    const source = initialDocuments[0];
+    const draftName = "Edited unapproved draft name";
+    const setupEvidence = {
+      questionKey: "legal_name",
+      value: "Candidate name from registration",
+      quote: "Registration records Candidate name from registration.",
+      sourceLabel: source.name,
+      documentId: source.id,
+      quoteVerified: true,
+    };
+    const grantDraftKey = `${orgId}:grant-setup`;
+    const profileDraftKey = `${orgId}:profile`;
+    state.setupDrafts.set(grantDraftKey, {
+      updatedAt: Date.now(),
+      data: {
+        version: 1,
+        evidence: [setupEvidence],
+        edits: { legal_name: { status: "confirmed", value: draftName } },
+        selected: [source.id],
+        completed: [source.id],
+        insurance: false,
+        reviews: {},
+      },
+    });
+    state.setupDrafts.set(profileDraftKey, {
+      updatedAt: Date.now(),
+      data: {
+        version: 1,
+        profile: { ...finalResult.profile, name: draftName },
+        focusText: "Community",
+        result: finalResult,
+        selected: [source.id],
+        includeInsurance: false,
+      },
+    });
+    const requestedDraftKey = `${orgId}:${flow.kind}`;
+    const otherDraftKey =
+      flow.kind === "grant-setup" ? profileDraftKey : grantDraftKey;
+    const requestedDraft = state.setupDrafts.get(requestedDraftKey);
+    const otherDraft = state.setupDrafts.get(otherDraftKey);
+    const deleteRequests = () =>
+      state.setupDraftRequests.filter(({ method }) => method === "DELETE");
+    await page.route("**/api/ai", (route) => {
+      const body = route.request().postDataJSON();
+      state.ai.push(body);
+      return route.fulfill({
+        json:
+          body.action === "setup-source"
+            ? { setupSuggestions: [setupEvidence] }
+            : stageResult(body),
+      });
+    });
+
+    const review = page.getByRole("dialog", { name: flow.review });
+    const confirm = page.getByRole("dialog", { name: flow.discard });
+    const sourceStep = page.getByRole("dialog", { name: flow.sources });
+    const existingAnswer = review.getByRole("textbox", {
+      name: flow.draftField,
+      exact: true,
+    });
+    const discard = review.getByRole("button", {
+      name: "Discard draft and start over",
+      exact: true,
+    });
+    const confirmDiscard = confirm.getByRole("button", {
+      name: "Discard and start over",
+      exact: true,
+    });
+    async function expectDraftAnswer() {
+      await expect(review).toBeVisible();
+      if (flow.kind === "grant-setup" && !(await existingAnswer.isVisible()))
+        await review
+          .locator("summary")
+          .filter({ hasText: "Legal identity and eligibility" })
+          .click();
+      await expect(existingAnswer).toHaveValue(draftName);
+    }
+
+    await page.goto("/?view=organisation");
+    await page.getByRole("button", { name: flow.open, exact: true }).click();
+    await expectDraftAnswer();
+    await discard.click();
+    await expect(confirm).toBeVisible();
+    expect(deleteRequests()).toHaveLength(0);
+    await confirm
+      .getByRole("button", { name: "Keep draft", exact: true })
+      .click();
+    await expectDraftAnswer();
+    expect(state.setupDrafts.get(requestedDraftKey)).toEqual(requestedDraft);
+    expect(deleteRequests()).toHaveLength(0);
+
+    state.failSetupDraftDelete = true;
+    await discard.click();
+    await confirmDiscard.click();
+    await expect(confirm.getByRole("alert")).toContainText(/try again/i);
+    expect(state.setupDrafts.get(requestedDraftKey)).toEqual(requestedDraft);
+    await confirm
+      .getByRole("button", { name: "Keep draft", exact: true })
+      .click();
+    await expectDraftAnswer();
+
+    state.failSetupDraftDelete = false;
+    await discard.click();
+    await confirmDiscard.click();
+    await expect(sourceStep).toBeVisible();
+    await expect(
+      sourceStep.getByRole("textbox", { name: flow.pastedText }),
+    ).toHaveValue("");
+    expect(state.setupDrafts.has(requestedDraftKey)).toBe(false);
+    expect(state.setupDrafts.get(otherDraftKey)).toEqual(otherDraft);
+    expect(deleteRequests()).toEqual(
+      Array.from({ length: 2 }, () => ({
+        method: "DELETE",
+        orgId,
+        kind: flow.kind,
+      })),
+    );
+    expect(state.ai).toHaveLength(0);
+    expect(state.updates).toHaveLength(0);
+    expect(state.organisations[0]).toEqual(approvedOrganisation);
+    expect(state.documents).toEqual(initialDocuments);
+
+    await sourceStep
+      .getByRole("checkbox", { name: source.name, exact: true })
+      .check();
+    await sourceStep
+      .getByRole("checkbox", { name: initialDocuments[1].name, exact: true })
+      .uncheck();
+    await sourceStep
+      .getByRole("button", { name: flow.analyse, exact: true })
+      .click();
+    await expect(review).toBeVisible();
+    expect(state.ai.map(({ action }) => action)).toEqual(
+      flow.kind === "grant-setup"
+        ? ["setup-source"]
+        : ["profile", "profile", "profile"],
+    );
+    expect(
+      state.ai.every(
+        ({ documentIds }) =>
+          JSON.stringify(documentIds) === JSON.stringify([source.id]),
+      ),
+    ).toBe(true);
+    expect(state.setupDrafts.get(otherDraftKey)).toEqual(otherDraft);
+    expect(state.updates).toHaveLength(0);
+  });
+}

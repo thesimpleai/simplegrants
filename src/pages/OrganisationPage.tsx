@@ -217,6 +217,7 @@ export default function OrganisationPage() {
   const [profileDraft, setProfileDraft] = useState<ProfileReviewDraft | null>(
     null,
   );
+  const [confirmDiscardProfile, setConfirmDiscardProfile] = useState(false);
   const [loadedDraftScope, setLoadedDraftScope] = useState("");
   const [failedDraftScope, setFailedDraftScope] = useState("");
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0);
@@ -226,6 +227,7 @@ export default function OrganisationPage() {
   const currentDraft = useRef<ProfileReviewDraft | null>(null);
   const checkedDraftScope = useRef("");
   const pendingDraftWrite = useRef<Promise<boolean> | null>(null);
+  const discardingDraftScopes = useRef(new Set<string>());
   const draftOrgId = app.mode === "live" ? org?.id : undefined;
   const draftActorId = app.user?.id;
   const draftScope =
@@ -240,6 +242,7 @@ export default function OrganisationPage() {
     profileReview.current = null;
     setFrequency(org?.notification_frequency ?? "weekly");
     setWizard(false);
+    setConfirmDiscardProfile(false);
     setGrantSetupOpen(false);
     setError("");
     setBusy("");
@@ -265,6 +268,7 @@ export default function OrganisationPage() {
         if (currentDraft.current?.scope === draftScope && stored) return;
         const review = stored && readPendingProfileReview(stored.data);
         if (stored && !review) {
+          checkedDraftScope.current = "";
           setFailedDraftScope(draftScope);
           return;
         }
@@ -280,7 +284,10 @@ export default function OrganisationPage() {
         setProfileDraft(entry);
       })
       .catch(() => {
-        if (active) setFailedDraftScope(draftScope);
+        if (active) {
+          checkedDraftScope.current = "";
+          setFailedDraftScope(draftScope);
+        }
       })
       .finally(() => {
         if (active) setLoadedDraftScope(draftScope);
@@ -292,7 +299,12 @@ export default function OrganisationPage() {
 
   const persistProfileDraft = useCallback(
     (review: PendingProfileReview) => {
-      if (!draftOrgId || !draftActorId) return Promise.resolve(false);
+      if (
+        !draftOrgId ||
+        !draftActorId ||
+        discardingDraftScopes.current.has(draftScope)
+      )
+        return Promise.resolve(false);
       const entry: ProfileReviewDraft = {
         scope: draftScope,
         review,
@@ -318,6 +330,7 @@ export default function OrganisationPage() {
             setFailedDraftScope("");
           }
         }
+        if (discardingDraftScopes.current.has(draftScope)) return false;
         await saveSetupReviewDraft(draftOrgId, draftActorId, "profile", review);
         return true;
       }
@@ -341,7 +354,15 @@ export default function OrganisationPage() {
   );
 
   useEffect(() => {
-    if (!wizard || step !== "review" || !result || !draftScope || busy) return;
+    if (
+      !wizard ||
+      step !== "review" ||
+      !result ||
+      !draftScope ||
+      busy ||
+      confirmDiscardProfile
+    )
+      return;
     const previous =
       currentDraft.current?.scope === draftScope
         ? currentDraft.current.review
@@ -365,6 +386,7 @@ export default function OrganisationPage() {
     return () => window.clearTimeout(timer);
   }, [
     busy,
+    confirmDiscardProfile,
     draftScope,
     focusText,
     includeInsurance,
@@ -434,9 +456,16 @@ export default function OrganisationPage() {
       setIncludeInsurance(draft.includeInsurance);
       return;
     }
+    startFreshProfileReview();
+  }
+  function startFreshProfileReview() {
+    profileReview.current = null;
     setStep("sources");
+    setHistory("");
     setResult(null);
     setIncludeInsurance(false);
+    setChecksConfirmed(false);
+    setApproveConfirmed(false);
     let selectedSize = 0;
     let selectedCount = 0;
     setSelected(
@@ -495,6 +524,44 @@ export default function OrganisationPage() {
       )
         closeWizard();
     } finally {
+      if (activeDraftScope.current === draftScope) setBusy("");
+    }
+  }
+  function cancelDiscardProfileDraft() {
+    setConfirmDiscardProfile(false);
+    setError("");
+  }
+  async function discardProfileDraft() {
+    if (
+      !result ||
+      !draftOrgId ||
+      !draftActorId ||
+      checkedDraftScope.current !== draftScope ||
+      discardingDraftScopes.current.has(draftScope)
+    )
+      return;
+    discardingDraftScopes.current.add(draftScope);
+    setBusy("discard-profile-draft");
+    setError("");
+    try {
+      await pendingDraftWrite.current;
+      if (activeDraftScope.current !== draftScope) return;
+      await removeSetupReviewDraft(draftOrgId, draftActorId, "profile");
+      if (activeDraftScope.current !== draftScope) return;
+      currentDraft.current = null;
+      setProfileDraft(null);
+      checkedDraftScope.current = draftScope;
+      setFailedDraftScope("");
+      setConfirmDiscardProfile(false);
+      setUploadReport(null);
+      startFreshProfileReview();
+    } catch {
+      if (activeDraftScope.current === draftScope)
+        setError(
+          "We couldn’t confirm that the draft was discarded. Your review is still open. Try again before starting over.",
+        );
+    } finally {
+      discardingDraftScopes.current.delete(draftScope);
       if (activeDraftScope.current === draftScope) setBusy("");
     }
   }
@@ -1264,12 +1331,12 @@ export default function OrganisationPage() {
       )}
       {grantSetupOpen && org && (
         <GrantSetupWizard
-          key={org.id}
+          key={`${org.id}:${app.user?.id ?? "demo"}`}
           organisation={org}
           onClose={() => setGrantSetupOpen(false)}
         />
       )}
-      {wizard && (
+      {wizard && !confirmDiscardProfile && (
         <Modal
           title={
             step === "sources"
@@ -1628,6 +1695,20 @@ export default function OrganisationPage() {
                 </span>
               </label>
               <div className="modal-footer">
+                {result &&
+                  draftScope &&
+                  checkedDraftScope.current === draftScope && (
+                    <button
+                      className="button secondary"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setError("");
+                        setConfirmDiscardProfile(true);
+                      }}
+                    >
+                      Discard draft and start over
+                    </button>
+                  )}
                 <button
                   className="button secondary"
                   disabled={!!busy}
@@ -1674,6 +1755,44 @@ export default function OrganisationPage() {
               </div>
             </div>
           )}
+        </Modal>
+      )}
+      {wizard && confirmDiscardProfile && (
+        <Modal
+          title="Discard profile draft?"
+          onClose={() => !busy && cancelDiscardProfileDraft()}
+        >
+          <div className="stack">
+            <p>
+              This will discard your unapproved profile draft and its edits.
+              Your approved details and uploaded documents stay saved.
+            </p>
+            {error && (
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="modal-footer">
+              <button
+                className="button secondary"
+                disabled={!!busy}
+                onClick={cancelDiscardProfileDraft}
+              >
+                Keep draft
+              </button>
+              <button
+                className="button primary"
+                disabled={!!busy}
+                onClick={discardProfileDraft}
+              >
+                {busy === "discard-profile-draft" ? (
+                  <Busy label="Discarding draft…" />
+                ) : (
+                  "Discard and start over"
+                )}
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
       {create && (
