@@ -269,8 +269,7 @@ export function providerReply(body) {
       reviews: [
         {
           questionKey: "legal_name",
-          basis: "direct_evidence",
-          recommendedAlternative,
+          advice: `use_${recommendedAlternative}`,
         },
       ],
     });

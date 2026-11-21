@@ -1,4 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import type {
+  SetupQuestionKey,
+  SetupSuggestion,
+} from "../../src/lib/setup-questionnaire";
 import type { DocumentRecord, Organisation, Profile } from "../../src/types";
 
 const orgId = "54ac553a-2aeb-4404-849c-8266b10f8383";
@@ -354,6 +358,142 @@ test("grant setup retries only failed sources, keeps conflicting evidence and wa
     },
     evidence: [first, second],
   });
+});
+
+test("grant setup splits an over-limit excerpt check and retries only the failed comparison after reload", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page);
+  const sourceFindings = initialDocuments.map((document, index) =>
+    [
+      {
+        questionKey: "legal_name",
+        value: ["Creekside Network Inc", "Creekside Community Association"][
+          index
+        ],
+      },
+      {
+        questionKey: "registration_number",
+        value: ["A0123456", "A0765432"][index],
+      },
+    ].map(({ questionKey, value }) => ({
+      questionKey,
+      value,
+      quote: `The record lists ${value}.`,
+      sourceLabel: document.name,
+      documentId: document.id,
+      quoteVerified: true,
+    })),
+  );
+  const comparisons: SetupQuestionKey[][] = [];
+  let allowLegalNameCheck = false;
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.action === "setup-source") {
+      const sourceIndex = initialDocuments.findIndex(
+        ({ id }) => id === body.documentIds[0],
+      );
+      return route.fulfill({
+        json: { setupSuggestions: sourceFindings[sourceIndex] },
+      });
+    }
+    const batch = body.conflicts as {
+      questionKey: SetupQuestionKey;
+      candidates: Omit<SetupSuggestion, "questionKey">[];
+    }[];
+    const keys = batch.map(({ questionKey }) => questionKey);
+    comparisons.push(keys);
+    if (
+      keys.length > 1 ||
+      (!allowLegalNameCheck && keys.includes("legal_name"))
+    )
+      return route.fulfill({
+        status: 502,
+        json: {
+          code: "SG_AI_OUTPUT_LIMIT",
+          reference: "aaf9605a-3af1-4487-82e7-cd2467da21bd",
+        },
+      });
+    return route.fulfill({
+      json: {
+        setupConflicts: batch.map(({ questionKey, candidates }) => ({
+          questionKey,
+          alternatives: candidates.map((candidate) => ({
+            ...candidate,
+            questionKey,
+          })),
+          recommendedAlternative: 0,
+          note: "The first excerpt supports this value.",
+        })),
+      },
+    });
+  });
+
+  const setup = page.getByRole("button", { name: "Set up for grants" });
+  const review = page.getByRole("dialog", {
+    name: "Review grant setup answers",
+  });
+  const legalName = review.getByRole("group", {
+    name: "What is your registered legal name?",
+    exact: true,
+  });
+  const registration = review.getByRole("group", {
+    name: "What is your public incorporation or registration number?",
+    exact: true,
+  });
+  const retry = review.getByRole("button", {
+    name: "Retry excerpt check",
+    exact: true,
+  });
+  await page.goto("/?view=organisation");
+  await setup.click();
+  for (const { name } of initialDocuments)
+    await page.getByRole("checkbox", { name, exact: true }).check();
+  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await expect(retry).toBeEnabled();
+  await expect(review.getByText("Draft saved for later.")).toBeVisible();
+  await expect(
+    registration.getByText(/Suggested by the second review/),
+  ).toBeVisible();
+  await expect(
+    legalName.getByText(/Suggested by the second review/),
+  ).toHaveCount(0);
+  await expect(legalName.getByRole("textbox")).toHaveValue("");
+  const manualChoices = legalName.getByRole("button", {
+    name: "Use this answer",
+  });
+  await expect(manualChoices).toHaveCount(2);
+  await expect(manualChoices.first()).toBeEnabled();
+  expect(comparisons).toEqual([
+    ["legal_name", "registration_number"],
+    ["legal_name"],
+    ["registration_number"],
+  ]);
+
+  await page.reload();
+  await setup.click();
+  await expect(retry).toBeEnabled();
+  await expect(
+    registration.getByText(/Suggested by the second review/),
+  ).toBeVisible();
+  expect(comparisons).toHaveLength(3);
+  allowLegalNameCheck = true;
+  await retry.click();
+  await expect(
+    legalName.getByText(/Suggested by the second review/),
+  ).toBeVisible();
+  await expect(
+    registration.getByText(/Suggested by the second review/),
+  ).toBeVisible();
+  await expect(retry).not.toBeVisible();
+  expect(comparisons.slice(3)).toEqual([["legal_name"]]);
+  expect(
+    state.ai
+      .filter(({ action }) => action === "setup-source")
+      .map(({ documentIds }) => documentIds),
+  ).toEqual(initialDocuments.map(({ id }) => [id]));
+  expect(state.updates).toHaveLength(0);
 });
 
 for (const viewportWidth of [1280, 390]) {

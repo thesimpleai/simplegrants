@@ -67,7 +67,7 @@ const empty: OrgData = {
   messages: [],
 };
 const Context = createContext<AppContextValue | null>(null);
-class AIRequestError extends Error {
+export class AIRequestError extends Error {
   constructor(
     message: string,
     readonly code: string,

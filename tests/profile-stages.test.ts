@@ -613,18 +613,15 @@ describe("source-based grant setup", () => {
       reviews: [
         {
           questionKey: "legal_name",
-          basis: "direct_evidence",
-          recommendedAlternative: 1,
+          advice: "use_1",
         },
         {
           questionKey: "description",
-          basis: "unresolved",
-          recommendedAlternative: 1,
+          advice: "unresolved",
         },
         {
           questionKey: "mission",
-          basis: "direct_evidence",
-          recommendedAlternative: 0,
+          advice: "use_0",
         },
       ],
     });
@@ -642,9 +639,14 @@ describe("source-based grant setup", () => {
       model: "gemini-4-neon",
       config: {
         thinkingConfig: { thinkingLevel: "LOW" },
-        maxOutputTokens: 1536,
+        maxOutputTokens: 4096,
       },
     });
+    const providerProperties =
+      mocks.generateContent.mock.calls[0][0].config.responseSchema.properties
+        .reviews.items.properties;
+    expect(Object.keys(providerProperties)).toEqual(["questionKey", "advice"]);
+    expect(providerProperties.advice.enum).toContain("use_3");
     expect(setupConflicts).toHaveLength(2);
     expect(setupConflicts[0]).toMatchObject({
       questionKey: "legal_name",
@@ -665,6 +667,85 @@ describe("source-based grant setup", () => {
     expect(prompt).not.toContain("STALE-NOT-SOURCE");
     expect(mocks.download).not.toHaveBeenCalled();
     expect(mocks.write).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["out of range", ["use_3"]],
+    ["not supported by its source quote", ["use_0"]],
+    ["reported more than once", ["use_1", "use_1"]],
+  ])(
+    "preserves both alternatives when the recommendation is %s",
+    async (_reason, advice) => {
+      const candidates = [
+        {
+          value: "Old Club",
+          quote: "The register gives no name.",
+          sourceLabel: "Earlier report",
+        },
+        {
+          value: "New Club",
+          quote: "The legal name is New Club.",
+          sourceLabel: "New register",
+          quoteVerified: true,
+        },
+      ];
+      model({
+        reviews: advice.map((code) => ({
+          questionKey: "legal_name",
+          advice: code,
+        })),
+      });
+      const response = await setup({
+        action: "setup-conflicts",
+        documentIds: [],
+        conflicts: [{ questionKey: "legal_name", candidates }],
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).setupConflicts).toEqual([
+        {
+          questionKey: "legal_name",
+          alternatives: candidates.map((candidate) => ({
+            questionKey: "legal_name",
+            ...candidate,
+          })),
+          note: "These excerpts do not resolve the difference. Check the originals or answer manually.",
+        },
+      ]);
+    },
+  );
+
+  it("reports a Neon conflict output limit without retrying the same payload", async () => {
+    mocks.generateContent.mockResolvedValueOnce({
+      text: '{"reviews":[',
+      modelVersion: "gemini-4-neon",
+      candidates: [{ finishReason: "MAX_TOKENS" }],
+      usageMetadata: { candidatesTokenCount: 16, thoughtsTokenCount: 4080 },
+    });
+    const response = await setup({
+      action: "setup-conflicts",
+      documentIds: [],
+      conflicts: [
+        {
+          questionKey: "legal_name",
+          candidates: [
+            {
+              value: "Old Club",
+              quote: "Registered name: Old Club",
+              sourceLabel: "Earlier register",
+            },
+            {
+              value: "New Club",
+              quote: "Registered name: New Club",
+              sourceLabel: "New register",
+            },
+          ],
+        },
+      ],
+    });
+    expect(response.status).toBe(502);
+    expect((await response.json()).code).toBe("SG_AI_OUTPUT_LIMIT");
+    expect(mocks.generateContent).toHaveBeenCalledOnce();
     expect(mocks.rpc).toHaveBeenCalledOnce();
   });
 });
