@@ -17,6 +17,7 @@ import {
   CalendarDays,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import { GRANT_RESEARCH_CATEGORY } from "../lib/grant-import";
 import type { ProfileReviewCheckpoint } from "../lib/contracts";
 import GrantSetupWizard from "../components/GrantSetupWizard";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
@@ -70,10 +71,14 @@ const profileProgress: Record<ProfileStage, string> = {
 const categories = [
   ["registration", "Registration documents"],
   ["acnc", "ACNC documents"],
+  ["financial_summary", "Public financial summaries"],
   ["financial_statement", "Financial statements"],
   ["audit_report", "Audited financial statements"],
   ["insurance", "Insurance"],
+  ["mission", "Mission and strategy"],
+  ["background", "Organisation background"],
   ["guidelines", "Grant guidelines"],
+  [GRANT_RESEARCH_CATEGORY, "Grant research report"],
   ["other", "Other documents"],
 ];
 const states = [
@@ -398,7 +403,14 @@ export default function OrganisationPage() {
     wizard,
   ]);
   const publicDocuments = app.data.documents.filter((document) =>
-    ["registration", "acnc", "other"].includes(document.category),
+    [
+      "registration",
+      "acnc",
+      "financial_summary",
+      "mission",
+      "background",
+      "other",
+    ].includes(document.category),
   );
   const insuranceDocuments = app.data.documents.filter((document) =>
     isInsuranceCategory(document.category),
@@ -674,9 +686,9 @@ export default function OrganisationPage() {
           action: "profile",
           text: history,
           documentIds: selected,
+          ...(includeInsurance ? { includeInsurance: true } : {}),
         },
-        (stage) => setProfileStage(stage),
-        profileReview,
+        { onProfileStage: setProfileStage, profileReview },
       );
       if (activeDraftScope.current !== draftScope) return;
       if (!draft.profile)
@@ -1061,17 +1073,8 @@ export default function OrganisationPage() {
                 </span>
                 <h2>Build reusable grant answers</h2>
                 <p>
-                  Work through registration, services, governance and other
-                  common grant questions using sources already in your library.
-                </p>
-                <ol className="simple-steps">
-                  <li>Find answers one source at a time</li>
-                  <li>Compare any disagreements</li>
-                  <li>Review answers and see what evidence is missing</li>
-                </ol>
-                <p className="small muted">
-                  You always have the final say. Nothing is approved
-                  automatically.
+                  Upload documents or enter your answers. Use the details you
+                  confirm in future grant applications.
                 </p>
               </section>
               <section className="card">

@@ -115,6 +115,7 @@ SQL
   run_sql "$repo_root/supabase/migrations/202611100006_document_formats.sql"
   run_sql "$repo_root/supabase/migrations/202611100007_organisation_type_default.sql"
   fi
+  run_sql "$repo_root/supabase/migrations/20261122224718_document_text_extracts.sql"
 else
   run_sql "$repo_root/supabase/install-simple-grant.sql"
 fi
@@ -124,10 +125,10 @@ node --input-type=module - "$test_dir/before.json" "$test_dir/after.json" <<'JS'
 import {readFileSync} from 'node:fs';
 const [before, after] = process.argv.slice(2).map((path)=>JSON.parse(readFileSync(path,'utf8')));
 if (before.unrelated_metadata_fingerprint !== after.unrelated_metadata_fingerprint || before.unrelated_object_count !== after.unrelated_object_count) throw new Error('Unrelated application metadata changed');
-if (!after.simple_grant_schema_exists || after.simple_grant_tables.length !== 13 || after.simple_grant_tables.some((table)=>!table.rls || table.anon_select)) throw new Error('Expected isolated RLS tables not found');
+if (!after.simple_grant_schema_exists || after.simple_grant_tables.length !== 14 || after.simple_grant_tables.some((table)=>!table.rls || table.anon_select)) throw new Error('Expected isolated RLS tables not found');
 if (after.simple_grant_bucket?.public !== false) throw new Error('SG bucket is not private');
 if (after.storage_policies.filter((policy)=>policy.name.startsWith('simple_grant_documents_')).length !== 8) throw new Error('Expected eight SG storage policies');
-process.stdout.write('PASS: unrelated public/auth/storage/history metadata fingerprint unchanged; 13 SG RLS tables, private bucket, eight SG storage policies.\n');
+process.stdout.write('PASS: unrelated public/auth/storage/history metadata fingerprint unchanged; 14 SG RLS tables, private bucket, eight SG storage policies.\n');
 JS
 # Reapplying an already-installed baseline must fail; never drop/reset to force it.
 if run_sql "$repo_root/supabase/install-simple-grant.sql" > /dev/null 2> "$test_dir/reinstall-error.log"; then
@@ -139,6 +140,7 @@ case "$(cat "$test_dir/reinstall-error.log")" in
 esac
 run_sql "$repo_root/supabase/tests/$legacy_checks"
 run_sql "$repo_root/supabase/tests/rls.sql"
+run_sql "$repo_root/supabase/tests/document-text-extracts.sql"
 
 run_sql "$repo_root/supabase/tests/auth-email.sql"
 node "$repo_root/supabase/tests/auth-email-concurrency.mjs" "$container_name"

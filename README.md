@@ -19,8 +19,9 @@ Without Supabase settings, the portal opens an explicitly labelled fictional dem
 
 - Simple Grants-branded Resend email-link sign-in with durable email/IP request limits and app-specific session storage; shared Supabase Auth identities and several organisations under one account.
 - Private, organisation-scoped document storage with database and storage row-level security, isolated in the `simple_grant` schema and `simple-grant-documents` bucket for shared Supabase projects. PDF/images, DOCX, XLSX and supported text formats can be selected as evidence; Office files are converted to bounded text before AI use.
-- Organisation onboarding with three separate Gemini requests: extract, check against the same original sources, then correct. Progress is shown for each stage; the final profile still requires human approval.
-- Google Search-grounded discovery, user-supplied opportunity imports and saved opportunities. Eligibility remains for review; the application does not invent match scores.
+- Grant setup with optional document uploads, a website field and manual answers. The app saves private source text, prefills supported answers and asks for review when sources materially disagree. Later drafts can reuse selected sources.
+- Organisation profile extraction, verification and correction use three separate Gemini requests. Each stage reports progress and the final profile requires human approval.
+- Grant discovery searches local programs, sector grants, and foundations, then checks a shortlist against funder sources before saving. Users can also import and save their own opportunities. Eligibility remains for review.
 - Applications gated by approved organisation facts, current guidelines, actual application questions, project information and required evidence. Editable drafts, downloads, status tracking and funder submission references.
 - Award-to-project transition, original proposal, budget, milestones, expenses, evidence links and persisted AI report drafts.
 - Signed, idempotent Resend inbound processing and a review inbox. Forwarding addresses stay hidden until an administrator confirms receiving setup with `VITE_INBOUND_EMAIL_ENABLED=true` and a valid configured hostname; existing messages and portal uploads remain usable before that. **Attachment metadata is retained; actual forwarded files must currently be uploaded in the portal.**
@@ -36,18 +37,18 @@ Read **[Deployment instructions](docs/DEPLOYMENT.md)** for Netlify settings, all
 
 The frontend uses React, TypeScript and Vite. Netlify Functions hold the Gemini and Resend keys. Supabase supplies Auth, Postgres and private Storage. Use Node 22 or later.
 
-Long AI phases run in Netlify Background Functions with a 90-second model deadline and browser progress polling. Temporary jobs use a server-only prefix in the existing private bucket and expire after 15 minutes, with hourly cleanup. No new migration or environment variable is needed.
+Long AI phases run in Netlify Background Functions with a 90-second model deadline and browser progress polling. Temporary jobs use a server-only prefix in the private bucket and expire after 15 minutes, with hourly cleanup. Document transcripts live separately and follow the lifetime of the source document.
 
-Profile preparation uses three authenticated AI requests; discovery and application drafting each use two. Every claimed phase counts toward the shared 60-request daily user budget. A failed flow restarts from its first phase, preserving saved source records; early phases do not save partial search results or application drafts.
+Profile preparation and grant discovery each use three authenticated AI requests. Application drafting uses two. Every claimed phase counts toward the shared 60-request daily user budget. Discovery saves opportunities after the final source check.
 
 For Netlify: build `npm test && npm run build`, publish `dist`; the checked-in `netlify.toml` supplies functions and routing. Set browser `VITE_SUPABASE_*` values at build time, and server-only Supabase, Gemini and Resend values for Functions. **Never prefix private API keys with `VITE_`.**
 
 For an existing shared Supabase project:
 
-1. A fresh installation uses **[`supabase/install-simple-grant.sql`](supabase/install-simple-grant.sql)**, containing all seven baselines in one transaction. Existing installations through 005 or 006 use **[`supabase/upgrade-qa.sql`](supabase/upgrade-qa.sql)**: the unchanged 006 format update plus 007, atomically and safely repeatable. If the installation stops at 004, apply 005 before that upgrade; do not repeat earlier baselines.
+1. A fresh installation uses [the combined installer](supabase/install-simple-grant.sql). Existing installations through 005 or 006 use [the QA upgrade](supabase/upgrade-qa.sql) to reach 007, then apply [the document text migration](supabase/migrations/20261122224718_document_text_extracts.sql) once. If the installation stops at 004, apply 005 before the QA upgrade.
 2. Append `simple_grant` to the existing Data API exposed schemas.
 3. Follow [Authentication](docs/AUTHENTICATION.md) to verify the Resend login sender on `simplegrants.com.au` and configure the four new login environment variables. No additional provider account is needed.
-4. Deploy `main` with the required upgrades through 007, the four login settings and verified Resend sender configured. Confirm Netlify has deployed that revision, then request a fresh Simple Grants email and test sign-in and private uploads. A source push does not prove live deployment; default preview origins cannot exercise production login.
+4. Apply the required upgrades before deploying `main`. Confirm Netlify has deployed that revision, then request a fresh Simple Grants email and test sign-in and private uploads on the canonical domain. Default preview origins cannot exercise production login.
 
 Keep the shared Auth Site URL, SMTP, templates, signup settings and other redirects unchanged. Simple Grants uses its own `/auth/confirm` page; its email branding and app-local sessions do not create an independent Auth user pool. **Do not run `supabase db push`, reset or migration-history repair against the shared project.** The dedicated schema/bucket preserves unrelated tables and CLI history; earlier public-schema Simple Grant data requires a separate reviewed migration. The server service key remains privileged across the entire project. Someone with project access must apply and test hosted setup; local tests have not verified it.
 

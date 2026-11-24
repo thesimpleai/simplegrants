@@ -101,6 +101,61 @@ describe("reusable grant-readiness questions", () => {
 });
 
 describe("questionnaire evidence review", () => {
+  it("groups formatted public identifiers and keeps different numbers and registry codes distinct", () => {
+    const acn = [
+      finding("registration_number", "601 234 567", "Registration certificate"),
+      finding("registration_number", "ACN:601234567", "Annual report"),
+    ];
+    const abn = [
+      finding("abn", "ABN 12 345 678 901", "ABN Lookup"),
+      finding("abn", "12345678901", "Annual report"),
+    ];
+    const groups = aggregateSetupEvidence([
+      ...acn,
+      ...abn,
+      finding("base_state", "Victoria", "Registration certificate"),
+      finding("base_state", "VIC", "Annual report"),
+      finding(
+        "registration_authority",
+        "Australian Securities and Investments Commission",
+        "Registration certificate",
+      ),
+      finding("registration_authority", "ASIC", "Annual report"),
+    ]);
+    expect(groups.registration_number).toEqual({
+      hasConflict: false,
+      alternatives: [{ value: acn[0].value, suggestions: acn }],
+    });
+    expect(groups.abn?.alternatives).toHaveLength(1);
+    expect(groups.base_state?.hasConflict).toBe(false);
+    expect(groups.registration_authority?.hasConflict).toBe(false);
+    expect(
+      chooseSetupAnswer(
+        questions.registration_number,
+        { status: "confirmed", value: "601234567" },
+        groups.registration_number?.alternatives,
+      ),
+    ).toMatchObject({ sources: acn });
+    expect(
+      aggregateSetupEvidence([
+        ...acn,
+        finding("registration_number", "601234568", "Another certificate"),
+      ]).registration_number?.hasConflict,
+    ).toBe(true);
+    expect(
+      aggregateSetupEvidence([
+        ...acn,
+        finding("registration_number", "ARBN 601234567", "Other register"),
+      ]).registration_number?.hasConflict,
+    ).toBe(true);
+    expect(
+      aggregateSetupEvidence([
+        finding("website", "https://EXAMPLE.org/About", "Website"),
+        finding("website", "https://example.org/about", "Annual report"),
+      ]).website?.hasConflict,
+    ).toBe(true);
+  });
+
   it("groups equivalent alternatives and keeps the provenance for competing values", () => {
     const registers = [
       finding("legal_name", "Example Incorporated", "Incorporation register"),

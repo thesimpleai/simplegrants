@@ -23,10 +23,17 @@ const grantId = "6a03978d-6266-46b6-b35e-bf8069e50744";
 const appId = "6a03978d-6266-46b6-b35e-bf8069e50745";
 const guidance =
   "Applicants must supply current public liability insurance. A project budget is mandatory. Financial audits are optional for this round.";
+const modelReadiness = {
+  criteria: { coverage: "partial", note: "The example needs human review." },
+  delivery: { coverage: "partial", note: "Dates are pending." },
+  budget: { coverage: "partial", note: "Costs need confirmation." },
+  suggestions: [],
+};
 const user = { id: "verified-user", email: "member@example.com" };
 let member: { role: string } | null;
 let guidelines: string;
 let details: Record<string, unknown>;
+let savedDraft: Record<string, unknown>;
 let documents: { name: string; category: string; expires_on: string | null }[];
 let writes: unknown[];
 let project: Record<string, unknown>;
@@ -84,6 +91,7 @@ function fakeDb() {
               status: "draft",
               updated_at: "2026-11-11T00:00:00.000Z",
               project_details: details,
+              draft: savedDraft,
               ...(typeof update === "object" && update !== null ? update : {}),
             },
             error: null,
@@ -156,6 +164,7 @@ beforeEach(() => {
     { name: "Insurance.pdf", category: "insurance", expires_on: "2099-01-01" },
   ];
   writes = [];
+  savedDraft = {};
   project = {
     id: "6a03978d-6266-46b6-b35e-bf8069e50746",
     org_id: orgId,
@@ -218,17 +227,28 @@ describe("original-guideline evidence preflight", () => {
         text: "EXCEL TEXT EXTRACT (unverified). SHEET: Budget\nB2: 1250.50\nB3: [Formula result unavailable]\nC3: [Saved spreadsheet error: #DIV/0!]",
       },
     ];
-    mocks.documentParts.mockResolvedValue({ parts, documents: [] });
+    const selected = { id: grantId, name: "Budget.xlsx" };
+    mocks.documentParts.mockResolvedValue({
+      parts,
+      documents: [selected],
+      documentTexts: new Map([[grantId, parts[0].text]]),
+    });
     mocks.generateJSON.mockResolvedValueOnce({
       documents: [],
       information: [],
     });
     mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
       sections: [
         {
           question: "Describe the budget",
+          coverage: "partial",
           answer:
             "Budget B2 records $1,250.50; remaining formula results require review.",
+          citations: [
+            { source: grantId, quote: "B2: 1250.50" },
+            { source: appId, quote: "unselected file" },
+          ],
         },
       ],
       missing_information: ["Budget B3 and C3 require correction"],
@@ -242,6 +262,9 @@ describe("original-guideline evidence preflight", () => {
       documentIds: [grantId],
     });
     expect(response.status).toBe(200);
+    const { draft } = await response.json();
+    expect(draft.evidence_sources).toEqual([selected]);
+    expect(draft.sections[0].evidence).toEqual(["Budget.xlsx · “B2: 1250.50”"]);
     expect(mocks.generateJSON.mock.calls[0][1]).toEqual(parts);
     expect(mocks.generateJSON.mock.calls[1][1]).toEqual(parts);
     expect(mocks.generateJSON.mock.calls[0][0]).toContain(
@@ -250,6 +273,148 @@ describe("original-guideline evidence preflight", () => {
     expect(mocks.generateJSON.mock.calls[1][0]).toContain(
       "sheet and cell address",
     );
+  });
+  it("keeps a reviewed answer and scores it separately from a selected-file revision", async () => {
+    const original = "We run workshops.\n\nProject dates are pending.";
+    savedDraft = { application_text: original };
+    const selected = { id: appId, name: "Delivery review.pdf" };
+    const quote = "In 2024, 36 carers attended workshops in Northfield.";
+    mocks.documentParts.mockResolvedValue({
+      documents: [selected],
+      parts: [
+        { text: "SOURCE DOCUMENT: Delivery review.pdf" },
+        { text: `[Page 2]\n${quote}` },
+      ],
+      documentTexts: new Map([[selected.id, `[Page 2]\n${quote}`]]),
+    });
+    const citation = { source: selected.id, quote };
+    const revision = {
+      answer: `We run workshops. ${quote}\n\nProject dates are pending.`,
+      citations: [citation],
+    };
+    const section = {
+      question: "Describe your delivery experience",
+      answer: "We run workshops. Project dates are pending.",
+      word_limit: 60,
+      coverage: "partial",
+      evidence: ["Insurance.pdf"],
+      suggestion: revision,
+    };
+    mocks.generateJSON.mockResolvedValueOnce({
+      documents: [],
+      information: [],
+    });
+    mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
+      sections: [
+        section,
+        {
+          ...section,
+          suggestion: { ...revision, citations: [{ source: grantId, quote }] },
+        },
+        {
+          ...section,
+          suggestion: {
+            ...revision,
+            citations: [
+              citation,
+              { source: selected.id, quote: "400 carers attended" },
+            ],
+          },
+        },
+        { ...section, word_limit: 3 },
+        { ...section, character_limit: 12 },
+        { ...section, suggestion: { ...revision, answer: original } },
+        {
+          ...section,
+          answer: "A complete and newly invented answer.",
+          coverage: "complete",
+        },
+      ],
+    });
+    const inputs = { reviewExistingDraft: true, documentIds: [selected.id] };
+    const preflight = await call(inputs);
+    expect(preflight.status).toBe(200);
+    const response = await call({
+      ...inputs,
+      ...(await preflight.json()),
+      draftStage: "generate",
+    });
+    expect(response.status).toBe(200);
+    const { draft } = await response.json();
+    expect(draft.evidence_sources).toEqual([selected]);
+    expect(draft.application_text).toBe(original);
+    expect(draft.sections[0]).toMatchObject({
+      answer: original,
+      evidence: [],
+      coverage: "partial",
+      suggestion: {
+        answer: revision.answer,
+        evidence: [`Delivery review.pdf, p. 2 · “${quote}”`],
+      },
+    });
+    for (const remaining of draft.sections.slice(1))
+      expect(remaining).not.toHaveProperty("suggestion");
+    expect(draft.sections.at(-1)).toMatchObject({
+      answer: "",
+      coverage: "missing",
+      evidence: [],
+    });
+    expect(
+      draft.readiness.checks.find(
+        (check: { key: string }) => check.key === "evidence",
+      ).points,
+    ).toBe(0);
+    expect(writes).toEqual([{ draft }]);
+  });
+  it("checks approved profile citations without claiming to have read library files", async () => {
+    savedDraft = { application_text: "We organise workshops." };
+    mocks.generateJSON.mockResolvedValueOnce({
+      documents: [],
+      information: [],
+    });
+    mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
+      sections: [
+        {
+          question: "Which organisation runs the workshops?",
+          answer: "We organise workshops.",
+          coverage: "complete",
+          character_limit: 18,
+          citations: [
+            {
+              source: "project.summary",
+              quote: "Community gardening workshops",
+            },
+          ],
+          suggestion: {
+            answer: "Example Charity.",
+            citations: [{ source: "profile.name", quote: "Example Charity" }],
+          },
+        },
+      ],
+    });
+    const preflight = await call({ reviewExistingDraft: true });
+    const response = await call({
+      ...(await preflight.json()),
+      draftStage: "generate",
+      reviewExistingDraft: true,
+    });
+    expect(response.status).toBe(200);
+    const { draft } = await response.json();
+    expect(draft.evidence_sources).toEqual([]);
+    expect(draft.sections[0]).toMatchObject({
+      evidence: ["Project summary · “Community gardening workshops”"],
+      suggestion: {
+        answer: "Example Charity.",
+        evidence: ["Approved profile · name · “Example Charity”"],
+      },
+    });
+    expect(
+      draft.readiness.checks.find(
+        (check: { key: string }) => check.key === "answers",
+      ).points,
+    ).toBe(15);
   });
   it.each([null, "2000-01-01", "2099-02-30"])(
     "blocks insurance with missing, expired or invalid expiry (%s) before model access",
@@ -297,6 +462,125 @@ describe("original-guideline evidence preflight", () => {
     expect(mocks.generateJSON).toHaveBeenCalledTimes(1);
     expect(writes).toEqual([]);
   });
+  it("keeps a missing project budget visible in an explicitly incomplete working draft", async () => {
+    details.budget_notes = "";
+    mocks.generateJSON.mockResolvedValueOnce({
+      documents: [],
+      information: [
+        {
+          label: "a project budget",
+          source_quote: "A project budget is mandatory.",
+          field: "budget",
+          rule: "required",
+          critical: true,
+          missing: true,
+        },
+      ],
+    });
+    mocks.generateJSON.mockResolvedValueOnce({
+      sections: [
+        {
+          question: "Describe the activities",
+          answer: "Community gardening workshops",
+          coverage: "complete",
+          evidence: ["Project summary"],
+        },
+        { question: "Attach a budget", answer: "", coverage: "missing" },
+      ],
+      readiness_review: {
+        criteria: { coverage: "partial", note: "The budget is mandatory." },
+        delivery: { coverage: "partial", note: "Workshop dates are pending." },
+        budget: {
+          coverage: "missing",
+          note: "No cost estimates are supplied.",
+        },
+        suggestions: [
+          {
+            action:
+              "Prepare a balanced project budget with venue and facilitator costs.",
+            why: "The funder requires an itemised budget.",
+            priority: "required",
+            requirement_labels: ["a project budget"],
+          },
+          {
+            action: "List venue and facilitator costs",
+            why: "This funds the two main delivery inputs.",
+            priority: "recommended",
+          },
+        ],
+      },
+    });
+    const preflight = await call({ allowIncompleteDraft: true });
+    expect(preflight.status).toBe(200);
+    const response = await call({
+      ...(await preflight.json()),
+      draftStage: "generate",
+      allowIncompleteDraft: true,
+    });
+    expect(response.status).toBe(200);
+    const { draft } = await response.json();
+    expect(draft.sections[1].answer).toBe("");
+    expect(draft.readiness).toMatchObject({
+      score: 46,
+      scoreLimit: 69,
+      suggestions: [
+        {
+          action:
+            "Prepare a balanced project budget with venue and facilitator costs.",
+          priority: "required",
+        },
+        { action: "List venue and facilitator costs", priority: "recommended" },
+      ],
+    });
+    expect(writes).toContainEqual(expect.objectContaining({ draft }));
+  });
+  it("keeps the required insurance gate for incomplete draft requests", async () => {
+    documents = [];
+    expect((await call({ allowIncompleteDraft: true })).status).toBe(422);
+    expect(mocks.generateJSON).not.toHaveBeenCalled();
+  });
+  it("assesses exact saved text while reporting missing mandatory evidence", async () => {
+    savedDraft = {
+      application_text:
+        "My original workshop description.\n\nDates are pending.",
+    };
+    documents = [];
+    mocks.generateJSON.mockResolvedValueOnce({
+      documents: [requirement()],
+      information: [],
+    });
+    mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
+      sections: [
+        {
+          question: "Describe the activities",
+          answer: "My original workshop description.",
+          coverage: "complete",
+        },
+      ],
+    });
+    const preflight = await call({ reviewExistingDraft: true });
+    expect(preflight.status).toBe(200);
+    const receipt = await preflight.json();
+    const response = await call({
+      ...receipt,
+      draftStage: "generate",
+      reviewExistingDraft: true,
+    });
+    expect(response.status).toBe(200);
+    const { draft } = await response.json();
+    expect(draft.application_text).toBe(savedDraft.application_text);
+    expect(draft.readiness).toMatchObject({
+      scoreLimit: 69,
+      suggestions: [
+        { action: "Upload public liability insurance.", priority: "required" },
+      ],
+    });
+    expect((await call({ ...receipt, draftStage: "generate" })).status).toBe(
+      422,
+    );
+    expect(writes).toContainEqual(expect.objectContaining({ draft }));
+  });
   it("permits drafting after required evidence is available, without requiring optional audit", async () => {
     documents = [
       {
@@ -318,9 +602,11 @@ describe("original-guideline evidence preflight", () => {
       information: [],
     });
     mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
       sections: [
         {
           question: "Describe activities",
+          coverage: "partial",
           answer: "Community gardening workshops.",
         },
       ],
@@ -347,9 +633,11 @@ describe("original-guideline evidence preflight", () => {
       information: [],
     });
     mocks.generateJSON.mockResolvedValueOnce({
+      readiness_review: modelReadiness,
       sections: [
         {
           question: "Describe activities",
+          coverage: "partial",
           answer: "Community gardening workshops",
         },
       ],

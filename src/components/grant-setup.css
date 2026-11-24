@@ -1,3 +1,110 @@
+.grant-setup-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.grant-setup-slot {
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 0.85rem;
+  background: #fff;
+  min-width: 0;
+}
+
+.grant-setup-slot-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.grant-setup-slot-header h3 {
+  font-size: 1rem;
+  margin: 0 0 0.22rem;
+}
+
+.grant-setup-slot p {
+  margin: 0;
+}
+
+.grant-setup-slot-header p {
+  line-height: 1.35;
+}
+
+.grant-setup-slot-header + p {
+  margin-top: 0.65rem;
+}
+
+.grant-setup .grant-setup-upload {
+  min-height: 2.5rem;
+  padding: 0.4rem 0.7rem;
+  white-space: nowrap;
+}
+
+.grant-setup-slot-files {
+  display: grid;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0.65rem 0 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.grant-setup-slot-files .checkbox-row {
+  color: var(--ink);
+}
+
+.grant-setup-slot-files input {
+  flex-shrink: 0;
+}
+
+.grant-setup-read {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--muted);
+}
+
+.grant-setup-read small {
+  flex-shrink: 0;
+}
+
+.grant-setup-upload-result,
+.grant-setup-review-count {
+  padding: 0.65rem 0.85rem;
+  background: var(--sage);
+  border-radius: 0.55rem;
+}
+
+.grant-setup-upload-result ul {
+  padding-inline-start: 1.25rem;
+  margin-bottom: 0;
+  overflow-wrap: anywhere;
+}
+
+.grant-setup-website {
+  max-width: 34rem;
+  color: var(--ink);
+}
+
+.grant-setup .grant-setup-actions {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .grant-setup .grant-setup-actions {
+    position: sticky;
+    top: -1.4rem;
+    z-index: 1;
+    padding-block: 0.4rem 0.6rem;
+    background: #fff;
+    box-shadow: 0 1px var(--line);
+  }
+}
+
 .grant-setup fieldset {
   min-inline-size: 0;
   margin: 0;
@@ -21,6 +128,12 @@
   cursor: pointer;
 }
 
+.grant-setup-section > summary small {
+  margin-inline-start: 0.65rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
 .grant-setup-section > :not(summary),
 .grant-setup-question > .section-actions {
   margin-block-start: 0.8rem;
@@ -35,6 +148,32 @@
   min-block-size: 9rem;
   line-height: 1.55;
   resize: vertical;
+}
+
+.grant-setup textarea.grant-setup-paste {
+  min-block-size: 6rem;
+}
+
+.grant-setup-question p {
+  margin-top: 0;
+  margin-bottom: 0.55rem;
+}
+
+.grant-setup .grant-setup-answer-actions:empty {
+  display: none;
+}
+
+.grant-setup-text-button {
+  min-height: 2rem;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 0.16rem;
+  padding-inline: 0.1rem;
+  color: var(--teal);
+}
+
+.grant-setup-question-filter {
+  align-self: flex-start;
 }
 
 @supports (field-sizing: content) {
@@ -55,6 +194,28 @@
   border-radius: 0.55rem;
   background: var(--cloud);
   overflow-wrap: anywhere;
+}
+
+.grant-setup-excerpts {
+  margin: 0.45rem 0;
+  overflow-wrap: anywhere;
+}
+
+.grant-setup-excerpts summary {
+  cursor: pointer;
+  width: fit-content;
+  padding-block: 0.2rem;
+  color: var(--teal);
+}
+
+.grant-setup-excerpts ul {
+  list-style: none;
+  margin: 0.45rem 0 0;
+  padding: 0;
+}
+
+.grant-setup-excerpts li + li {
+  margin-block-start: 0.8rem;
 }
 
 .grant-setup blockquote {

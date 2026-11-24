@@ -5,7 +5,10 @@ vi.mock("@google/genai", () => ({
     models = { generateContent: mocks.generateContent };
   },
 }));
-import { discoverOpportunities } from "../netlify/functions/lib/gemini";
+import {
+  discoverOpportunities,
+  extractDiscoveredOpportunities,
+} from "../netlify/functions/lib/gemini";
 import type { AppDb } from "../netlify/functions/lib/db";
 import type { Opportunity, Organisation } from "../src/types";
 const org = {
@@ -289,6 +292,42 @@ describe("source-backed discovery round preservation", () => {
     expect(updates[0]).not.toHaveProperty("guidelines_text");
     expect(inserts).toHaveLength(0);
   });
+  it("keeps established dates when a current search cannot retrieve the source", async () => {
+    const current = saved({
+      opens_on: "2027-01-01",
+      closes_at: "2027-01-31T06:00:00.000Z",
+      provenance: { closing_date: "2027-01-31" },
+    });
+    rows = [current];
+    mocks.generateContent.mockResolvedValueOnce({
+      text: JSON.stringify({
+        opportunities: [
+          fresh({
+            opens_on: "2027-02-01",
+            closing_date: "2027-12-31",
+            closes_at: "2027-12-31T17:00:00+11:00",
+          }),
+        ],
+      }),
+    });
+    const result = await extractDiscoveredOpportunities(db(), org, {
+      phase: "verified",
+      summary: "The council program is a lead from search.",
+      sources: [{ title: "Provider", uri: sourceUrl }],
+    });
+    expect(inserts).toHaveLength(0);
+    expect(result.opportunities).toMatchObject([
+      {
+        id: current.id,
+        opens_on: current.opens_on,
+        closes_at: current.closes_at,
+        provenance: {
+          round_status_check_required: true,
+          closing_date: "2027-01-31",
+        },
+      },
+    ]);
+  });
   it("does not re-advertise an archived round in returned search results or digest input", async () => {
     const archived = saved({
       opens_on: "2027-01-01",
@@ -302,6 +341,22 @@ describe("source-backed discovery round preservation", () => {
     expect(rows[0].status).toBe("archived");
     expect(rows[0].guidelines_text).toBe(archived.guidelines_text);
     expect(inserts).toHaveLength(0);
+  });
+  it("uses the verified local cutoff instant across Australian calendar boundaries", async () => {
+    vi.setSystemTime(new Date("2026-11-10T14:00:00Z"));
+    response(
+      fresh({
+        opens_on: "2026-10-01",
+        closes_at: "2026-11-10T23:00:00+08:00",
+        closing_date: "2026-11-10",
+        round_status: "open",
+        location: "Western Australia",
+      }),
+    );
+    const result = await discoverOpportunities(db(), org);
+    expect(result.opportunities).toMatchObject([
+      { closes_at: "2026-11-10T15:00:00.000Z", location: "Western Australia" },
+    ]);
   });
   it("preserves a known date and flags an ambiguous overlapping change instead of asserting a new round", async () => {
     const current = saved({

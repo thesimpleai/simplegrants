@@ -12,8 +12,11 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import GrantImportDialog from "../components/GrantImportDialog";
 import { opportunityIdFromParams } from "../lib/auth-links";
-import type { Opportunity } from "../types";
+import type { DiscoveryCheckpoint } from "../lib/contracts";
+import { profileDateOnly, profileToday } from "../lib/profile-dates";
+import type { DiscoveryStage, Opportunity } from "../types";
 import {
   Badge,
   Busy,
@@ -26,6 +29,78 @@ import {
   money,
   errorMessage,
 } from "../components/ui";
+
+const discoveryProgress: Record<
+  DiscoveryStage,
+  { label: string; detail: string }
+> = {
+  search: {
+    label: "Searching grants…",
+    detail: "Looking across local programs, sector grants and foundations.",
+  },
+  verify: {
+    label: "Checking funder listings…",
+    detail:
+      "Checking current rounds, application dates and eligibility requirements.",
+  },
+  extract: {
+    label: "Saving opportunities…",
+    detail: "Combining duplicate listings and saving opportunities for review.",
+  },
+};
+
+function closingDate(opportunity: Opportunity) {
+  return profileDateOnly(opportunity.provenance.closing_date);
+}
+
+function roundLabel(opportunity: Opportunity) {
+  const closing = closingDate(opportunity);
+  const knownTime = Date.parse(opportunity.closes_at ?? "");
+  if (
+    Number.isFinite(knownTime)
+      ? knownTime < Date.now()
+      : closing && closing < profileToday()
+  )
+    return "Past round";
+  if (opportunity.provenance.round_status_check_required === true)
+    return "Check current status";
+  switch (opportunity.provenance.round_status) {
+    case "open":
+      return "Open";
+    case "upcoming":
+      return opportunity.opens_on && opportunity.opens_on <= profileToday()
+        ? "Check current status"
+        : "Upcoming";
+    case "rolling":
+      return "Rolling";
+    default:
+      return null;
+  }
+}
+
+function compareClosingDates(left: Opportunity, right: Opportunity) {
+  function day(opportunity: Opportunity) {
+    const timestamp = Date.parse(opportunity.closes_at ?? "");
+    return (
+      closingDate(opportunity) ??
+      (Number.isFinite(timestamp)
+        ? profileToday(new Date(timestamp))
+        : "9999-12-31")
+    );
+  }
+  return (
+    day(left).localeCompare(day(right)) ||
+    Date.parse(left.closes_at ?? "9999") - Date.parse(right.closes_at ?? "9999")
+  );
+}
+
+function recommendationOrder(opportunity: Opportunity) {
+  if (roundLabel(opportunity) === "Past round") return 3;
+  if (opportunity.provenance.fit === "potential") return 0;
+  if (opportunity.provenance.fit === "check") return 1;
+  return 2;
+}
+
 function legacySource(url: string) {
   try {
     const value = new URL(url);
@@ -102,11 +177,12 @@ export default function OpportunitiesPage({
     [filter, setFilter] = useState("all"),
     [selected, setSelected] = useState(""),
     [importing, setImporting] = useState(false),
-    [text, setText] = useState(""),
     [busy, setBusy] = useState(false),
+    [discoveryStage, setDiscoveryStage] = useState<DiscoveryStage | null>(null),
     [error, setError] = useState(""),
     [sort, setSort] = useState("recommended");
   const attemptedRepair = useRef(new Set<string>());
+  const discoveryReview = useRef<DiscoveryCheckpoint | null>(null);
   const [repairing, setRepairing] = useState(false);
   const repairActor = useRef("");
   repairActor.current = `${app.user?.id}:${app.org?.id}`;
@@ -146,6 +222,11 @@ export default function OpportunitiesPage({
   const opportunity = app.data.opportunities.find(
     (o) => o.id === selected && o.org_id === app.org?.id,
   );
+  const deadlineNote =
+    typeof opportunity?.provenance.deadline_note === "string"
+      ? opportunity.provenance.deadline_note.trim()
+      : "";
+  const progress = discoveryStage ? discoveryProgress[discoveryStage] : null;
   useEffect(() => {
     const syncSelection = () => {
       const params = new URLSearchParams(window.location.search);
@@ -201,51 +282,32 @@ export default function OpportunitiesPage({
     )
     .sort((a, b) =>
       sort === "closing"
-        ? new Date(a.closes_at ?? "9999").getTime() -
-          new Date(b.closes_at ?? "9999").getTime()
-        : (b.match_score ?? 0) - (a.match_score ?? 0),
+        ? compareClosingDates(a, b)
+        : recommendationOrder(a) - recommendationOrder(b) ||
+          (b.match_score ?? 0) - (a.match_score ?? 0) ||
+          compareClosingDates(a, b),
     );
   async function discover() {
     setBusy(true);
     setError("");
     try {
-      const result = await app.runAI({ action: "discover" });
+      const result = await app.runAI(
+        { action: "discover" },
+        { onDiscoveryStage: setDiscoveryStage, discoveryReview },
+      );
       app.notify(
         result.message ??
           "Grant search complete. Review each opportunity against the funder’s current guidelines.",
       );
     } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function importGrant() {
-    if (
-      !text.trim() &&
-      !app.data.documents.some((d) => d.category === "guidelines")
-    ) {
       setError(
-        "Paste the opportunity details or upload guidelines in My organisation first.",
+        errorMessage(e) +
+          (discoveryReview.current
+            ? " Select Find grants with AI to retry the unfinished step."
+            : ""),
       );
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      await app.runAI({
-        action: "import-grant",
-        text,
-        documentIds: app.data.documents
-          .filter((d) => d.category === "guidelines")
-          .map((d) => d.id),
-      });
-      setImporting(false);
-      setText("");
-      app.notify("Opportunity added. Please check the source and dates.");
-    } catch (e) {
-      setError(errorMessage(e));
     } finally {
+      setDiscoveryStage(null);
       setBusy(false);
     }
   }
@@ -314,11 +376,11 @@ export default function OpportunitiesPage({
             }}
           >
             <Upload size={17} />
-            Add a grant
+            Import grants
           </button>
           <button className="button primary" disabled={busy} onClick={discover}>
             {busy ? (
-              <Busy label="Finding and checking sources…" />
+              <Busy label={progress?.label ?? "Working…"} />
             ) : (
               <>
                 <Sparkles size={17} />
@@ -333,20 +395,17 @@ export default function OpportunitiesPage({
           {error}
         </p>
       )}
-      <div className="insight-banner">
+      <div className="insight-banner" role="status">
         <span className="sparkle-tile">
           <Sparkles size={22} />
         </span>
         <div>
-          <strong>A helping hand, tailored to your organisation</strong>
+          <strong>{progress?.label ?? "Search across funders"}</strong>
           <p>
-            We look for opportunities that fit your work. You make the final
-            call.
+            {progress?.detail ??
+              "We search by location and purpose, then check the funder’s current round and requirements."}
           </p>
         </div>
-        <Badge tone="cream">
-          {app.org?.focus_areas.length ?? 0} areas of focus
-        </Badge>
       </div>
       <div className="filter-toolbar">
         <div className="segmented">
@@ -393,88 +452,109 @@ export default function OpportunitiesPage({
         />
       </label>
       <div className="grant-grid">
-        {opportunities.map((o) => (
-          <article className="grant-card" key={o.id}>
-            <div className="grant-card-top">
-              <span
-                className={`funder-icon ${o.id.endsWith("2") ? "ochre" : o.id.endsWith("3") ? "purple" : ""}`}
-              >
-                <span>
-                  {o.funder
-                    .split(" ")
-                    .map((x) => x[0])
-                    .slice(0, 2)
-                    .join("")}
+        {opportunities.map((o) => {
+          const round = roundLabel(o);
+          const status = sourceStatus(o);
+          return (
+            <article className="grant-card" key={o.id}>
+              <div className="grant-card-top">
+                <span
+                  className={`funder-icon ${o.id.endsWith("2") ? "ochre" : o.id.endsWith("3") ? "purple" : ""}`}
+                >
+                  <span>
+                    {o.funder
+                      .split(" ")
+                      .map((x) => x[0])
+                      .slice(0, 2)
+                      .join("")}
+                  </span>
                 </span>
-              </span>
-              <div className="grant-card-meta">
-                <Badge tone={sourceStatus(o).tone}>
-                  {sourceStatus(o).label}
-                </Badge>
-                {o.provenance.date_review_required === true && (
-                  <Badge tone="cream">Check application dates</Badge>
-                )}
+                <div className="grant-card-meta">
+                  <Badge
+                    tone={
+                      round === "Open" || round === "Rolling"
+                        ? "green"
+                        : round
+                          ? "cream"
+                          : status.tone
+                    }
+                  >
+                    {round ?? status.label}
+                  </Badge>
+                  {o.provenance.date_review_required === true && (
+                    <Badge tone="cream">Check application dates</Badge>
+                  )}
+                </div>
+                <button
+                  className={`icon-button bookmark ${o.status === "saved" ? "is-saved" : ""}`}
+                  aria-label={
+                    o.status === "saved"
+                      ? `Unsave ${o.title}`
+                      : `Save ${o.title}`
+                  }
+                  onClick={() => toggleSaved(o)}
+                >
+                  <Bookmark
+                    size={20}
+                    fill={o.status === "saved" ? "currentColor" : "none"}
+                  />
+                </button>
+              </div>
+              <p className="funder-name">{o.funder}</p>
+              <h2>
+                <button
+                  onClick={() => {
+                    selectOpportunity(o.id);
+                  }}
+                >
+                  {o.title}
+                </button>
+              </h2>
+              <p className="grant-description">{o.summary}</p>
+              <div className="tag-list">
+                {o.focus_areas.slice(0, 2).map((t) => (
+                  <span className="tag" key={t}>
+                    {t}
+                  </span>
+                ))}
+              </div>
+              <div className="grant-facts">
+                <div>
+                  <span className="muted">Funding available</span>
+                  <strong>
+                    {o.amount_min && o.amount_max
+                      ? `${money(o.amount_min)} – ${money(o.amount_max)}`
+                      : money(o.amount_max)}
+                  </strong>
+                </div>
+                <div>
+                  <span>
+                    <CalendarDays size={14} />{" "}
+                    {round === "Upcoming" && o.opens_on
+                      ? `Opens ${date(o.opens_on)}`
+                      : closingDate(o) || o.closes_at
+                        ? `Closes ${date(closingDate(o) ?? o.closes_at)}`
+                        : round === "Rolling"
+                          ? "Rolling applications"
+                          : "Check deadline"}
+                  </span>
+                  <span>
+                    <MapPin size={14} />
+                    {o.location || "Location to confirm"}
+                  </span>
+                </div>
               </div>
               <button
-                className={`icon-button bookmark ${o.status === "saved" ? "is-saved" : ""}`}
-                aria-label={
-                  o.status === "saved" ? `Unsave ${o.title}` : `Save ${o.title}`
-                }
-                onClick={() => toggleSaved(o)}
-              >
-                <Bookmark
-                  size={20}
-                  fill={o.status === "saved" ? "currentColor" : "none"}
-                />
-              </button>
-            </div>
-            <p className="funder-name">{o.funder}</p>
-            <h2>
-              <button
+                className="grant-card-action"
                 onClick={() => {
                   selectOpportunity(o.id);
                 }}
               >
-                {o.title}
+                Explore this grant <ArrowRight size={18} />
               </button>
-            </h2>
-            <p className="grant-description">{o.summary}</p>
-            <div className="tag-list">
-              {o.focus_areas.slice(0, 2).map((t) => (
-                <span className="tag" key={t}>
-                  {t}
-                </span>
-              ))}
-            </div>
-            <div className="grant-facts">
-              <div>
-                <span className="muted">Funding available</span>
-                <strong>
-                  {o.amount_min && o.amount_max
-                    ? `${money(o.amount_min)} – ${money(o.amount_max)}`
-                    : money(o.amount_max)}
-                </strong>
-              </div>
-              <div>
-                <span>
-                  <CalendarDays size={14} /> Closes {date(o.closes_at)}
-                </span>
-                <span>
-                  <MapPin size={14} />
-                  {o.location || "Location to confirm"}
-                </span>
-              </div>
-            </div>
-            <button
-              className="grant-card-action"
-              onClick={() => {
-                selectOpportunity(o.id);
-              }}
-            >
-              Explore this grant <ArrowRight size={18} />
-            </button>
-          </article>
-        ))}
+            </article>
+          );
+        })}
       </div>
       {!opportunities.length && (
         <EmptyState
@@ -487,7 +567,7 @@ export default function OpportunitiesPage({
           description={
             search
               ? "Try a different keyword or clear the filters."
-              : "Search with AI, or add a grant you have found elsewhere."
+              : "Search with AI or import grants from your own research."
           }
           action={
             <button
@@ -523,12 +603,19 @@ export default function OpportunitiesPage({
             )}
             {opportunity.provenance.date_review_required === true && (
               <Notice>
-                We couldn’t confirm this grant round’s dates. Check the funder’s
-                current listing before planning your application. Previously
-                saved dates are shown below where available.
+                {deadlineNote ||
+                  "Confirm the deadline against the funder’s current listing before planning your application."}
               </Notice>
             )}
+            {deadlineNote &&
+              opportunity.provenance.date_review_required !== true && (
+                <p className="muted">{deadlineNote}</p>
+              )}
             <p>{opportunity.summary}</p>
+            {typeof opportunity.provenance.fit_note === "string" &&
+              opportunity.provenance.fit_note.trim() && (
+                <p className="muted">{opportunity.provenance.fit_note}</p>
+              )}
             <div className="detail-facts">
               <div>
                 <span>Funding</span>
@@ -540,7 +627,16 @@ export default function OpportunitiesPage({
               </div>
               <div>
                 <span>Closes</span>
-                <strong>{deadline(opportunity.closes_at)}</strong>
+                <strong>
+                  {opportunity.closes_at &&
+                  opportunity.provenance.date_review_required !== true
+                    ? deadline(opportunity.closes_at)
+                    : closingDate(opportunity) || opportunity.closes_at
+                      ? `${date(closingDate(opportunity) ?? opportunity.closes_at)} (time to confirm)`
+                      : roundLabel(opportunity) === "Rolling"
+                        ? "Rolling applications"
+                        : deadline(null)}
+                </strong>
               </div>
             </div>
             <h3>Before you apply</h3>
@@ -588,63 +684,7 @@ export default function OpportunitiesPage({
           </div>
         </Modal>
       )}
-      {importing && (
-        <Modal
-          title="Add a grant you found"
-          onClose={() => !busy && setImporting(false)}
-        >
-          <form
-            className="stack"
-            onSubmit={(e) => {
-              e.preventDefault();
-              importGrant();
-            }}
-          >
-            <p>
-              Paste the grant details, its original website link and program
-              guidelines. AI will organise the information for you.
-            </p>
-            <label className="form-field">
-              Grant information
-              <textarea
-                rows={9}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Paste the funder’s listing, website address and guidelines here…"
-              />
-            </label>
-            <Notice>
-              For a document, first upload it as Grant guidelines in My
-              organisation. Your uploaded guidelines will be included in this
-              import.
-            </Notice>
-            {error && (
-              <p className="error-box" role="alert">
-                {error}
-              </p>
-            )}
-            <div className="modal-footer">
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => setImporting(false)}
-              >
-                Cancel
-              </button>
-              <button className="button primary" disabled={busy} type="submit">
-                {busy ? (
-                  <Busy label="Reading details…" />
-                ) : (
-                  <>
-                    <Sparkles size={17} />
-                    Add with AI
-                  </>
-                )}
-              </button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      {importing && <GrantImportDialog onClose={() => setImporting(false)} />}
     </>
   );
 }

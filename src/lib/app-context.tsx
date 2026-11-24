@@ -1,4 +1,5 @@
 import { requestAIPhase } from "./ai-transport";
+import { AI_RECEIPT_MAX_AGE_MS } from "./ai-job-timing";
 import {
   createContext,
   useContext,
@@ -15,11 +16,16 @@ import type {
   Organisation,
   OrgData,
   Profile,
-  ProfileStage,
   ReviewCheck,
+  SearchDraft,
   UploadBatchResult,
 } from "../types";
-import type { AppContextValue, ProfileReviewCheckpoint } from "./contracts";
+import type {
+  AIProgress,
+  AppContextValue,
+  DiscoveryCheckpoint,
+  ProfileReviewCheckpoint,
+} from "./contracts";
 import { configured, supabase } from "./supabase";
 import { DOCUMENT_BUCKET } from "./constants";
 import {
@@ -35,6 +41,7 @@ import { safeAuthReturnPath } from "./auth-links";
 import { validExpiryDate } from "./grant-requirements";
 import { demoData, demoOrg, demoOrgTwo } from "./demo";
 import { isApplicationResearch } from "./application-research";
+import { grantImportPreviewSchema } from "./grant-import";
 function organisationPreferenceKey(userId: string) {
   let project = configured ? "connected-project" : "demo";
   try {
@@ -460,7 +467,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     if (expiresOn !== null && !validExpiryDate(expiresOn))
       throw new Error("Enter a valid document expiry date.");
-    const result: UploadBatchResult = { saved: [], failed: [], skipped: [] };
+    const result: UploadBatchResult = {
+      saved: [],
+      savedDocumentIds: [],
+      failed: [],
+      skipped: [],
+    };
     if (!files.length) return result;
     if (files.length > MAX_UPLOAD_FILES)
       throw new Error(
@@ -527,7 +539,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         );
         break;
       }
-      const path = `${targetOrg}/${crypto.randomUUID()}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      const id = crypto.randomUUID();
+      const path = `${targetOrg}/${id}/${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
       let stored = false;
       try {
         const uploaded = await supabase.storage
@@ -537,6 +550,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         stored = true;
         if (!isCurrent()) throw new Error("organisation_changed");
         const saved = await supabase.from("documents").insert({
+          id,
           org_id: targetOrg,
           name: file.name,
           category,
@@ -548,6 +562,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
         if (saved.error) throw saved.error;
         result.saved.push(file.name);
+        result.savedDocumentIds.push(id);
       } catch (error) {
         if (stored) {
           try {
@@ -578,10 +593,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         /* The workspace connection card retries loading saved records. */
       }
     }
-    if (isCurrent())
-      notify(
-        `${result.saved.length} saved · ${result.failed.length} failed · ${result.skipped.length} skipped. Review the upload results.`,
-      );
     return result;
   }
   async function updateDocumentExpiry(id: string, expiresOn: string | null) {
@@ -704,8 +715,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
   async function runAI(
     payload: Parameters<AppContextValue["runAI"]>[0],
-    onProgress?: (stage: ProfileStage) => void,
-    profileReview?: { current: ProfileReviewCheckpoint | null },
+    {
+      onProfileStage: onProgress,
+      profileReview,
+      onDiscoveryStage,
+      discoveryReview,
+    }: AIProgress = {},
   ): Promise<AIResult> {
     if (!supabase)
       throw new Error(
@@ -743,11 +758,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           (item.suggestion === undefined ||
             typeof item.suggestion === "string"),
       );
-    const savedFiles = ["profile", "setup-source", "setup-conflicts"].includes(
-      original.action,
-    )
-      ? " Your uploaded documents are still saved in your library."
-      : "";
+    const savedFiles =
+      ["profile", "setup-source", "setup-conflicts", "import-grant"].includes(
+        original.action,
+      ) &&
+      (original.action !== "import-grant" || original.documentIds.length)
+        ? " Your uploaded documents are still saved in your library."
+        : "";
     function ensureCurrent() {
       if (
         !targetOrg ||
@@ -756,6 +773,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         currentUserId.current !== targetUser
       ) {
         if (profileReview) profileReview.current = null;
+        if (discoveryReview) discoveryReview.current = null;
         throw new Error(
           "Your selected organisation or sign-in changed. Return to the original organisation and try again. Your saved documents remain in its library.",
         );
@@ -822,6 +840,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       session = result.data.session;
     } catch {
       if (profileReview) profileReview.current = null;
+      if (discoveryReview) discoveryReview.current = null;
       throw new Error(
         `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
       );
@@ -829,6 +848,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ensureCurrent();
     if (!session || session.user.id !== targetUser) {
       if (profileReview) profileReview.current = null;
+      if (discoveryReview) discoveryReview.current = null;
       throw new Error(
         `Please sign in again to use your AI assistant.${savedFiles} Reference: SG_AI_SESSION.`,
       );
@@ -1018,15 +1038,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         throw error;
       }
     }
-    const isReceipt = (result: Record<string, unknown>) =>
+    const isReceipt = (
+      result: Record<string, unknown>,
+    ): result is Record<string, unknown> & {
+      sourceFingerprint: string;
+      stageIssuedAt: number;
+    } =>
       typeof result.sourceFingerprint === "string" &&
       /^[0-9a-f]{64}$/i.test(result.sourceFingerprint) &&
       typeof result.stageIssuedAt === "number" &&
       Number.isSafeInteger(result.stageIssuedAt) &&
       result.stageIssuedAt > 0;
-    const isSources = (value: unknown) =>
+    const isSources = (value: unknown, allowEmpty: boolean) =>
       Array.isArray(value) &&
-      value.length > 0 &&
+      (allowEmpty || value.length > 0) &&
       value.length <= 20 &&
       value.every((source) => {
         if (
@@ -1044,12 +1069,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return false;
         }
       });
-    const isSearchDraft = (value: unknown) =>
+    const isSearchDraft = (value: unknown): value is SearchDraft =>
       isRecord(value) &&
       typeof value.summary === "string" &&
       value.summary.length > 0 &&
       value.summary.length <= 30000 &&
-      isSources(value.sources);
+      (value.phase === undefined ||
+        value.phase === "search" ||
+        value.phase === "verified") &&
+      isSources(
+        value.sources,
+        value.phase === "search" || value.phase === "verified",
+      );
     const isRequirement = (value: unknown) =>
       isRecord(value) &&
       typeof value.label === "string" &&
@@ -1091,16 +1122,77 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     let result: Record<string, unknown>;
     if (original.action === "discover") {
-      const searched = await requestAI({ discoveryStage: "search" });
-      if (!isReceipt(searched) || !isSearchDraft(searched.searchDraft))
-        throw failure();
-      ensureCurrent();
-      result = await requestAI({
-        discoveryStage: "extract",
-        searchDraft: searched.searchDraft,
-        sourceFingerprint: searched.sourceFingerprint,
-        stageIssuedAt: searched.stageIssuedAt,
-      });
+      function saveDiscoveryStep(
+        response: Record<string, unknown>,
+        stage: DiscoveryCheckpoint["stage"],
+      ): DiscoveryCheckpoint {
+        ensureCurrent();
+        if (!isReceipt(response) || !isSearchDraft(response.searchDraft))
+          throw failure();
+        const checkpoint = {
+          userId: session!.user.id,
+          orgId: targetOrg,
+          stage,
+          receipt: {
+            searchDraft: response.searchDraft,
+            sourceFingerprint: response.sourceFingerprint,
+            stageIssuedAt: response.stageIssuedAt,
+          },
+        };
+        if (discoveryReview) discoveryReview.current = checkpoint;
+        return checkpoint;
+      }
+      let checkpoint = discoveryReview?.current;
+      if (
+        checkpoint &&
+        (checkpoint.userId !== targetUser ||
+          checkpoint.orgId !== targetOrg ||
+          Date.now() - checkpoint.receipt.stageIssuedAt >=
+            AI_RECEIPT_MAX_AGE_MS)
+      ) {
+        if (discoveryReview) discoveryReview.current = null;
+        checkpoint = null;
+      }
+      try {
+        if (!checkpoint) {
+          onDiscoveryStage?.("search");
+          checkpoint = saveDiscoveryStep(
+            await requestAI({ discoveryStage: "search" }),
+            "verify",
+          );
+        }
+        if (checkpoint.stage === "verify") {
+          onDiscoveryStage?.("verify");
+          checkpoint = saveDiscoveryStep(
+            await requestAI({
+              discoveryStage: "verify",
+              ...checkpoint.receipt,
+            }),
+            "extract",
+          );
+        }
+        onDiscoveryStage?.("extract");
+        result = await requestAI({
+          discoveryStage: "extract",
+          ...checkpoint.receipt,
+        });
+        if (discoveryReview) discoveryReview.current = null;
+      } catch (error) {
+        if (
+          discoveryReview &&
+          !(
+            error instanceof AIRequestError &&
+            [
+              "SG_AI_NETWORK",
+              "SG_AI_TIMEOUT",
+              "SG_AI_UNAVAILABLE",
+              "SG_AI_OUTPUT_LIMIT",
+            ].includes(error.code)
+          )
+        )
+          discoveryReview.current = null;
+        throw error;
+      }
     } else if (original.action === "draft") {
       const checked = await requestAI({ draftStage: "preflight" });
       if (
@@ -1116,8 +1208,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         stageIssuedAt: checked.stageIssuedAt,
       });
     } else result = await requestAI();
-    const valid =
-      original.action === "discover" || original.action === "import-grant"
+    const importPreview =
+      original.action === "import-grant" && original.importStage === "preview";
+    const valid = importPreview
+      ? grantImportPreviewSchema.safeParse(result).success
+      : original.action === "discover" || original.action === "import-grant"
         ? Array.isArray(result.opportunities)
         : original.action === "draft"
           ? isRecord(result.draft)
@@ -1135,6 +1230,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!valid) throw failure();
     ensureCurrent();
     if (
+      !importPreview &&
       ["discover", "import-grant", "draft", "report"].includes(original.action)
     ) {
       try {

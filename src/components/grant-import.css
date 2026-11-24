@@ -1,0 +1,44 @@
+.grant-import {
+  overflow-wrap: anywhere;
+}
+.grant-import input[type="file"] {
+  width: 100%;
+  min-width: 0;
+}
+.grant-import [id="grant-import-file-types"] {
+  margin-top: -10px;
+}
+.grant-import-library summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.grant-import-library .checkbox-row {
+  margin-top: 6px;
+}
+.grant-import-list,
+.grant-import-notes {
+  margin: 0;
+}
+.grant-import-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.grant-import-candidate {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: white;
+}
+.grant-import-candidate strong {
+  font-size: 15px;
+  color: var(--ink);
+}
+.grant-import-candidate > div {
+  margin-left: 24px;
+}
+.grant-import-candidate p {
+  margin: 4px 0;
+}

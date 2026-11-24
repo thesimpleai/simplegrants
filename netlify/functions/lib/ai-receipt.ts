@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { AI_RECEIPT_MAX_AGE_MS } from "../../../src/lib/ai-job-timing";
 import { authRateSecret } from "./auth-email";
 import { HttpError } from "./core";
-const MAX_AGE = 15 * 60 * 1000;
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object")
@@ -18,10 +18,15 @@ export function aiOriginalFingerprint(value: unknown) {
     .update(JSON.stringify(canonical(value)))
     .digest("hex");
 }
+const receiptStages = {
+  discover: "search",
+  draft: "preflight",
+  "import-grant": "preview",
+} as const;
 function signature(
   actor: string,
   orgId: string,
-  action: "discover" | "draft",
+  action: keyof typeof receiptStages,
   original: string,
   state: unknown,
   issuedAt: number,
@@ -34,7 +39,7 @@ function signature(
           actor,
           orgId,
           action,
-          stage: action === "discover" ? "search" : "preflight",
+          stage: receiptStages[action],
           original,
           state,
           issuedAt,
@@ -46,7 +51,7 @@ function signature(
 export function issueAIReceipt(
   actor: string,
   orgId: string,
-  action: "discover" | "draft",
+  action: keyof typeof receiptStages,
   original: string,
   state: unknown,
 ) {
@@ -66,7 +71,7 @@ export function issueAIReceipt(
 export function verifyAIReceipt(
   actor: string,
   orgId: string,
-  action: "discover" | "draft",
+  action: keyof typeof receiptStages,
   original: string,
   state: unknown,
   fingerprint: string | undefined,
@@ -77,7 +82,7 @@ export function verifyAIReceipt(
     !/^[0-9a-f]{64}$/.test(fingerprint) ||
     !Number.isSafeInteger(issuedAt) ||
     issuedAt! > Date.now() ||
-    Date.now() - issuedAt! > MAX_AGE
+    Date.now() - issuedAt! > AI_RECEIPT_MAX_AGE_MS
   )
     throw new HttpError(
       409,

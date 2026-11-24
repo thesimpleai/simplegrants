@@ -1,8 +1,10 @@
 import type { User } from "@supabase/supabase-js";
 import type { SetupQuestionKey, SetupSuggestion } from "./setup-questionnaire";
+import type { GrantImportCandidate } from "./grant-import";
 import type {
   AIResult,
   Application,
+  DiscoveryStage,
   Frequency,
   FundedProject,
   InboxMessage,
@@ -12,6 +14,7 @@ import type {
   Profile,
   ProfileStage,
   ReviewCheck,
+  SearchDraft,
   UploadBatchResult,
 } from "../types";
 export interface ProfileReviewCheckpoint {
@@ -23,6 +26,24 @@ export interface ProfileReviewCheckpoint {
   profileDraft: Profile;
   profileChecks?: ReviewCheck[];
   evidence: unknown[];
+}
+
+export interface AIProgress {
+  onProfileStage?: (stage: ProfileStage) => void;
+  profileReview?: { current: ProfileReviewCheckpoint | null };
+  onDiscoveryStage?: (stage: DiscoveryStage) => void;
+  discoveryReview?: { current: DiscoveryCheckpoint | null };
+}
+
+export interface DiscoveryCheckpoint {
+  userId: string;
+  orgId: string;
+  stage: "verify" | "extract";
+  receipt: {
+    searchDraft: SearchDraft;
+    sourceFingerprint: string;
+    stageIssuedAt: number;
+  };
 }
 
 export interface AppContextValue {
@@ -61,13 +82,19 @@ export interface AppContextValue {
       projectId?: string;
       message?: string;
       includeInsurance?: boolean;
+      allowIncompleteDraft?: boolean;
+      reviewExistingDraft?: boolean;
+      importStage?: "preview" | "save";
+      importCandidates?: GrantImportCandidate[];
+      selectedIndexes?: number[];
+      sourceFingerprint?: string;
+      stageIssuedAt?: number;
       conflicts?: {
         questionKey: SetupQuestionKey;
         candidates: Omit<SetupSuggestion, "questionKey">[];
       }[];
     },
-    onProgress?: (stage: ProfileStage) => void,
-    profileReview?: { current: ProfileReviewCheckpoint | null },
+    progress?: AIProgress,
   ) => Promise<AIResult>;
   refresh: () => Promise<void>;
   repairSourceLinks: () => Promise<{

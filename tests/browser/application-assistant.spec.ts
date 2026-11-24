@@ -195,12 +195,28 @@ export const supabase={auth:{getSession:async()=>({data:{session:{user,access_to
   return state;
 }
 
+async function openSources(page: Page) {
+  await page.getByRole("button", { name: "Project", exact: true }).click();
+  await page
+    .getByText("Funder guidelines and questions", { exact: true })
+    .click();
+}
+const review = (page: Page) =>
+  page.getByRole("button", { name: "Draft & review", exact: true }).click();
+
+async function researchSources(page: Page) {
+  await openSources(page);
+  await page
+    .getByRole("button", { name: "Research this grant with AI", exact: true })
+    .click();
+}
 async function start(page: Page) {
   await page.goto(`/?view=opportunities&org=${orgId}&grant=${grantId}`);
   await page
     .getByRole("button", { name: "Start application", exact: true })
     .click();
   await expect(page.getByRole("dialog")).toContainText(application.title);
+  await researchSources(page);
   await expect(
     page.getByRole("region", { name: "Application assistant" }),
   ).toContainText(research.summary);
@@ -210,7 +226,7 @@ const confirmation = (page: Page) =>
     name: /I checked the complete current official guidelines/,
   });
 
-test("Start application opens the existing draft, polls background research and preserves reviewed text through save and reopen", async ({
+test("requested background research preserves the existing draft through save and reopen", async ({
   page,
 }) => {
   const state = await workspace(page, { async: true });
@@ -229,9 +245,6 @@ test("Start application opens the existing draft, polls background research and 
   await expect(
     page.getByLabel("Application questions and word limits"),
   ).toHaveValue(String(application.project_details.application_questions));
-  await expect(page.getByLabel("Your application draft")).toHaveValue(
-    "My carefully edited manual draft.",
-  );
   await page
     .getByText("Source excerpts and application questions", { exact: true })
     .click();
@@ -260,8 +273,13 @@ test("Start application opens the existing draft, polls background research and 
   });
   expect(state.application.draft).toEqual(application.draft);
   expect(state.grant.guidelines_text).toBe(grant.guidelines_text);
+  await review(page);
+  await expect(page.getByLabel("Your application draft")).toHaveValue(
+    "My carefully edited manual draft.",
+  );
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.locator(".application-row").click();
+  await openSources(page);
   await expect(confirmation(page)).toBeChecked();
   await expect(
     page.getByRole("region", { name: "Application assistant" }),
@@ -278,6 +296,7 @@ test("source suggestions fill only empty fields and require human checking of co
   await expect(
     page.getByLabel("Application questions and word limits"),
   ).toHaveValue("");
+  await confirmation(page).check();
   await page
     .getByText("Source excerpts and application questions", { exact: true })
     .click();
@@ -327,6 +346,7 @@ test("unavailable guidelines retain the actual funder download or portal link", 
   await page
     .getByRole("button", { name: "Start application", exact: true })
     .click();
+  await researchSources(page);
   const assistant = page.getByRole("region", { name: "Application assistant" });
   await expect(assistant).toContainText(
     "Current guidelines could not be retrieved",
@@ -337,7 +357,7 @@ test("unavailable guidelines retain the actual funder download or portal link", 
     }),
   ).toHaveAttribute("href", sourceUrl);
   await expect(assistant).toContainText(
-    "Upload them to My organisation using the Guidelines type",
+    "upload them to My organisation using the Guidelines type",
   );
   await expect(
     assistant.getByRole("button", {
@@ -355,11 +375,13 @@ test("an absent funder source does not produce an invented download link", async
   await page
     .getByRole("button", { name: "Start application", exact: true })
     .click();
+  await researchSources(page);
   const assistant = page.getByRole("region", { name: "Application assistant" });
   await expect(assistant).toContainText(
     "Current guidelines could not be retrieved",
   );
   await expect(assistant.getByRole("link")).toHaveCount(0);
+  await review(page);
   await expect(page.getByLabel("Your application draft")).toHaveValue(
     "My carefully edited manual draft.",
   );
@@ -373,8 +395,10 @@ test("a retrieved source with unconfirmed administrator status is labelled for c
   await page
     .getByRole("button", { name: "Start application", exact: true })
     .click();
+  await researchSources(page);
   const assistant = page.getByRole("region", { name: "Application assistant" });
   await expect(assistant).toContainText("could not be established");
+  await page.getByText("Research notes and sources", { exact: true }).click();
   await expect(
     assistant.getByRole("link", {
       name: "Open the funder’s guidelines or application portal",
@@ -385,4 +409,56 @@ test("a retrieved source with unconfirmed administrator status is labelled for c
       name: "Saved grant source — official administrator unconfirmed",
     }),
   ).toHaveAttribute("href", sourceUrl);
+});
+
+test("opening an application makes no research request and users can keep writing or close during requested research", async ({
+  page,
+}) => {
+  const state = await workspace(page);
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  await page.route("**/api/ai", async (route) => {
+    state.ai.push(route.request().postDataJSON());
+    await pending;
+    return route.fulfill({ json: { applicationResearch: research } });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}&grant=${grantId}`);
+  await page
+    .getByRole("button", { name: "Start application", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Check edited draft", exact: true }),
+  ).toBeVisible();
+  expect(state.ai).toHaveLength(0);
+  await researchSources(page);
+  await expect.poll(() => state.ai.length).toBe(1);
+  await page
+    .getByLabel("Tell us about your project")
+    .fill("This can be typed while research runs.");
+  await page
+    .getByLabel("Current program guidelines")
+    .fill("Current grant rules");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect
+    .poll(() => state.grant.guidelines_text)
+    .toBe("Current grant rules");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.locator(".application-row").click();
+  await openSources(page);
+  finish();
+  await expect(page.getByLabel("Tell us about your project")).toHaveValue(
+    "This can be typed while research runs.",
+  );
+  await expect(
+    page.getByRole("button", {
+      name: "Research this grant with AI",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  await expect(page.getByText(research.summary, { exact: true })).toHaveCount(
+    0,
+  );
 });

@@ -28,23 +28,42 @@ import {
   grant,
   application,
   evidence,
+  charterText,
   providerReply,
+  discoveryFixture,
+  grantReportFixture,
   setupEvidence,
   setupSourceFacts,
 } from "./fixtures.mjs";
+import {
+  compactRegistrationExcerpt,
+  fixtureDocumentFromBytes,
+  loadSafeCircle,
+  runSafeCircleRounds,
+} from "./safe-circle.mjs";
 const run = promisify(execFile);
 const live = process.argv.includes("--live");
 const quick = process.argv.includes("--quick");
+const circleDirectory = process.argv
+  .find((argument) => argument.startsWith("--safe-circle="))
+  ?.slice("--safe-circle=".length);
+const liveCircle = process.argv.includes("--live-safe-circle");
 const flashModel = "gemini-flash-latest";
 const neonModel = "gemini-4-neon";
 const reviewDraftPrefix = `simple-grant-documents/.setup-review-drafts/${orgId}/${actorId}`;
 const liveFallbacks = [];
-if (live && !process.env.GEMINI_API_KEY)
+if ((live && circleDirectory) || (liveCircle && (!circleDirectory || live)))
+  throw Error(
+    "Use --live-safe-circle with --safe-circle=PATH for the selected public Safe Circle files, or --live on its own for fictional files.",
+  );
+if ((live || liveCircle) && !process.env.GEMINI_API_KEY)
   throw Error(
     "Add GEMINI_API_KEY through environment secret settings before running --live.",
   );
+const circle =
+  circleDirectory && (await loadSafeCircle(circleDirectory, liveCircle));
 const root = await mkdtemp(join(tmpdir(), "simplegrants-ai-runtime-"));
-if (live && process.env.HTTPS_PROXY) {
+if ((live || liveCircle) && process.env.HTTPS_PROXY) {
   if (typeof http.setGlobalProxyFromEnv !== "function")
     throw Error(
       "Live checks through an environment proxy require Node 24.5 or later.",
@@ -60,6 +79,8 @@ const state = {
   polls: 0,
   modelCalls: 0,
   payloads: [],
+  discoveryRedirects: 0,
+  transcriptions: [],
   workers: [],
   setupJobs: new Map(),
   setupEvents: [],
@@ -95,7 +116,8 @@ const tables = {
   organizations: state.orgs,
   opportunities: state.grants,
   applications: state.applications,
-  documents: evidence.map((doc) => doc.record),
+  documents: circle ? [] : evidence.map((doc) => doc.record),
+  document_text_extracts: [],
   organization_members: [{ org_id: orgId, user_id: actorId, role: "owner" }],
   funded_projects: [],
   expenses: [],
@@ -115,6 +137,12 @@ function modelFromProviderPath(pathname) {
   );
   assert.ok(match, `Unexpected Gemini SDK endpoint ${pathname}`);
   return match[1];
+}
+function transcriptionPart(body) {
+  const parts = body.contents[0].parts;
+  return parts.some(({ text }) => text?.startsWith("Transcribe"))
+    ? parts.find(({ inlineData }) => inlineData)?.inlineData
+    : undefined;
 }
 let site, browser;
 const handlers = new Map();
@@ -175,7 +203,8 @@ async function invoke(name, url, method, headers, body) {
 }
 function matches(row, search) {
   for (const [field, filter] of search) {
-    if (["select", "order", "limit", "offset"].includes(field)) continue;
+    if (["select", "order", "limit", "offset", "on_conflict"].includes(field))
+      continue;
     if (filter.startsWith("eq.") && String(row[field]) !== filter.slice(3))
       return false;
     if (
@@ -203,6 +232,28 @@ const server = createServer(async (request, response) => {
         : null;
     if (url.pathname === "/gemini-fixture") {
       const model = modelFromProviderPath(url.searchParams.get("sdkPath"));
+      const parts = body.contents[0].parts;
+      const original = transcriptionPart(body);
+      if (original) {
+        const real = fixtureDocumentFromBytes(circle, original);
+        const charter = evidence.find(({ name }) => name === "Charter.pdf");
+        assert.equal(original.mimeType, "application/pdf");
+        assert.ok(
+          real || Buffer.from(original.data, "base64").equals(charter.bytes),
+        );
+        state.transcriptions.push(real?.name ?? charter.name);
+        return json(response, {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [{ text: real?.transcript ?? charterText }],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        });
+      }
       state.modelCalls++;
       state.payloads.push({
         body,
@@ -270,6 +321,41 @@ const server = createServer(async (request, response) => {
         state.delayed = true;
         await sleep(91000);
       }
+      if (
+        circle &&
+        body.generationConfig?.responseSchema?.properties?.suggestions
+      ) {
+        const source = circle.find(({ name }) =>
+          parts.some(({ text }) =>
+            text?.startsWith(`SOURCE DOCUMENT: ${name}.`),
+          ),
+        );
+        const excerpt = compactRegistrationExcerpt(circle);
+        assert.ok(
+          source || parts[0].text.endsWith(excerpt),
+          "Unknown Safe Circle source",
+        );
+        const suggestions = source
+          ? (source.suggestions ?? [])
+          : [
+              {
+                questionKey: "registration_number",
+                textValue: circle[0].registrationNumber,
+                quote: excerpt,
+              },
+            ];
+        return json(response, {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [{ text: JSON.stringify({ suggestions }) }],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        });
+      }
       return json(response, providerReply(body));
     }
     if (url.pathname === "/auth/v1/user") return json(response, user);
@@ -297,13 +383,23 @@ const server = createServer(async (request, response) => {
               : {},
           );
       } else if (request.method === "POST") {
-        const row = {
-          id: randomUUID(),
-          created_at: new Date().toISOString(),
-          ...body,
-        };
-        rows.push(row);
-        selected = [row];
+        const conflictKey = url.searchParams.get("on_conflict");
+        selected = [];
+        for (const item of Array.isArray(body) ? body : [body]) {
+          const row = {
+            id: randomUUID(),
+            created_at: new Date().toISOString(),
+            ...item,
+          };
+          const duplicate =
+            conflictKey &&
+            rows.some((existing) =>
+              conflictKey.split(",").every((key) => existing[key] === row[key]),
+            );
+          if (duplicate) continue;
+          rows.push(row);
+          selected.push(row);
+        }
       }
       return json(
         response,
@@ -327,9 +423,22 @@ const server = createServer(async (request, response) => {
             },
             409,
           );
+        let storageBytes = bytes;
+        let type = request.headers["content-type"];
+        if (type?.startsWith("multipart/form-data")) {
+          const form = await new Response(bytes, {
+            headers: { "Content-Type": type },
+          }).formData();
+          const file = [...form.values()].find(
+            (value) => typeof value !== "string",
+          );
+          assert.ok(file, "Expected a file in the Storage upload");
+          storageBytes = Buffer.from(await file.arrayBuffer());
+          type = file.type;
+        }
         objects.set(path, {
-          bytes,
-          type: request.headers["content-type"],
+          bytes: storageBytes,
+          type,
           created_at: new Date().toISOString(),
         });
         return json(response, { Key: path, Id: randomUUID() });
@@ -372,12 +481,28 @@ const server = createServer(async (request, response) => {
         state.setupEvents.push(["queued", body.action, body.documentIds]);
       }
       const setupJob = state.setupJobs.get(url.searchParams.get("jobId"));
-      if (name === "ai-jobs" && setupJob && result.status === 200)
+      if (name === "ai-jobs" && setupJob && result.status === 200) {
         state.setupEvents.push([
           "completed",
           setupJob.action,
           setupJob.documentIds,
         ]);
+        if (circle && setupJob.action === "setup-source") {
+          const { setupSuggestions = [] } = await result.clone().json();
+          const keys = [
+            ...new Set(setupSuggestions.map(({ questionKey }) => questionKey)),
+          ];
+          const doc = tables.documents.find(
+            ({ id }) => id === setupJob.documentIds[0],
+          );
+          const source = doc
+            ? `file ${circle.findIndex(({ name }) => name === doc.name) + 1} (${doc.category})`
+            : "pasted information";
+          console.log(
+            `Safe Circle ${source} fields: ${keys.join(", ") || "none"}.`,
+          );
+        }
+      }
       response.writeHead(result.status, Object.fromEntries(result.headers));
       return response.end(Buffer.from(await result.arrayBuffer()));
     }
@@ -418,7 +543,7 @@ try {
     SUPABASE_SERVICE_ROLE_KEY: "fixture-service",
     AUTH_APP_URL: "https://simplegrants.com.au",
     AUTH_RATE_LIMIT_SECRET: randomBytes(32).toString("hex"),
-    ...(!live
+    ...(!live && !liveCircle
       ? { GEMINI_API_KEY: "fixture-gemini", GEMINI_MODEL: flashModel }
       : {}),
   });
@@ -445,10 +570,23 @@ try {
       return new Response(null, { status: 202 });
     }
     if (url.hostname === "generativelanguage.googleapis.com") {
-      if (live && !state.providerFailure) {
+      if ((live || liveCircle) && !state.providerFailure) {
+        const body = JSON.parse(await request.clone().text());
+        const original = transcriptionPart(body);
+        if (original) {
+          if (liveCircle) {
+            const selected = fixtureDocumentFromBytes(circle, original);
+            if (!selected)
+              throw Error(
+                "Live check requested a file outside its selected fixtures.",
+              );
+            state.transcriptions.push(selected.name);
+          } else state.transcriptions.push("Charter.pdf");
+          return originalFetch(request);
+        }
         state.modelCalls++;
         state.payloads.push({
-          body: JSON.parse(await request.clone().text()),
+          body,
           model: modelFromProviderPath(url.pathname),
           timeout: request.headers.get("x-server-timeout"),
         });
@@ -465,10 +603,27 @@ try {
         }),
       );
     }
+    if (
+      !live &&
+      !liveCircle &&
+      url.href === discoveryFixture.officialRedirect
+    ) {
+      assert.ok(["HEAD", "GET"].includes(request.method));
+      assert.equal(request.redirect, "manual");
+      state.discoveryRedirects++;
+      return new Response(null, {
+        status: 302,
+        headers: { Location: discoveryFixture.officialUrl },
+      });
+    }
+    if (circle && url.origin !== site)
+      throw Error(
+        "Only local fixture endpoints and the explicitly enabled Gemini test are allowed.",
+      );
     return originalFetch(request);
   };
   console.log(
-    `Packaging actual Netlify functions; provider mode: ${live ? "LIVE GEMINI" : "isolated HTTP fixture"}`,
+    `Packaging actual Netlify functions; provider mode: ${live || liveCircle ? "LIVE GEMINI" : "isolated HTTP fixture"}`,
   );
   const packaged = await zipFunctions(
     "netlify/functions",
@@ -531,6 +686,13 @@ try {
     args: ["--no-sandbox"],
   });
   const page = await browser.newPage();
+  if (circle) {
+    await page.route(/^https?:\/\//, (route) =>
+      new URL(route.request().url()).origin === site
+        ? route.continue()
+        : route.abort(),
+    );
+  }
   page.on("pageerror", (error) => state.errors.push(error));
   await page.addInitScript(
     ({ site, token, user }) =>
@@ -547,6 +709,62 @@ try {
       ),
     { site, token, user },
   );
+  if (circle) {
+    await runSafeCircleRounds({
+      page,
+      url: `${site}/?view=organisation&org=${orgId}`,
+      directory: circleDirectory,
+      documents: circle,
+      rows: tables.documents,
+      extracts: tables.document_text_extracts,
+      setupEvents: state.setupEvents,
+      transcriptions: state.transcriptions,
+      currentOrg: () => state.orgs[0],
+      live: liveCircle,
+    });
+  } else {
+    await runFictionalRounds(page);
+  }
+  await Promise.all(state.workers);
+  assert.equal(
+    state.errors.length,
+    0,
+    "No browser or fixture errors should occur",
+  );
+  console.log(
+    `PASS: packaged AI runtime/browser suite complete. Evidence: ${root}`,
+  );
+} catch (error) {
+  if (circle) {
+    console.error(`Safe Circle check failed. ${error.message.split("\n")[0]}`);
+    const testFrame = error.stack
+      ?.split("\n")
+      .find(
+        (line) =>
+          line.startsWith("    at ") &&
+          line.includes("/tests/runtime/safe-circle.mjs:"),
+      );
+    if (testFrame) console.error(testFrame.trim());
+    process.exitCode = 1;
+  } else {
+    if (browser) {
+      const pages = browser.contexts().flatMap((context) => context.pages());
+      if (pages[0])
+        await pages[0].screenshot({
+          path: join(root, "failure.png"),
+          fullPage: true,
+        });
+    }
+    console.error(`Runtime test evidence: ${root}`);
+    throw error;
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+  if (browser) await browser.close();
+  await new Promise((resolve) => server.close(resolve));
+}
+
+async function runFictionalRounds(page) {
   await page.goto(`${site}/?view=organisation&org=${orgId}`);
   await page
     .getByRole("button", { name: "Update with AI", exact: true })
@@ -607,6 +825,7 @@ try {
   await page.goto(`${site}/?view=applications&org=${orgId}`);
   await page.locator(".application-row").click();
   const callsBeforeDraft = state.payloads.length;
+  await page.getByText("Supporting documents", { exact: true }).click();
   for (const doc of evidence)
     await page
       .getByRole("checkbox", {
@@ -617,12 +836,20 @@ try {
   await page
     .getByRole("button", { name: "Prepare draft with AI", exact: true })
     .click();
+  await page
+    .getByText("Edit draft text", { exact: true })
+    .click({ timeout: live ? 300000 : 60000 });
   await expect(
     page.getByRole("textbox", { name: "Your application draft", exact: true }),
   ).toHaveValue(/gardening|garden/i, { timeout: live ? 300000 : 60000 });
   const draft = state.applications[0].draft;
   assert.ok(draft.sections.length);
   assert.equal(draft.human_review_required, true);
+  assert.equal(draft.readiness.checks.length, 5);
+  assert.deepEqual(
+    draft.evidence_sources.map(({ name }) => name).sort(),
+    evidence.map(({ name }) => name).sort(),
+  );
   for (const section of draft.sections)
     assert.ok(
       section.answer.trim().split(/\s+/).length <= 80,
@@ -637,11 +864,29 @@ try {
     ({ body }) => body.generationConfig?.responseSchema?.properties?.sections,
   );
   assert.ok(preflightAttempts.length > 0);
+  assert.deepEqual(state.transcriptions, ["Charter.pdf"]);
+  for (const { body } of draftAttempts) {
+    const parts = JSON.stringify(body.contents);
+    assert.ok(!parts.includes("inlineData"));
+  }
+  assert.ok(
+    draftAttempts.some(({ body }) =>
+      JSON.stringify(body.contents).includes("SOURCE DOCUMENT: Charter.pdf"),
+    ),
+  );
+  const charter = evidence.find(({ name }) => name === "Charter.pdf");
+  assert.ok(
+    tables.document_text_extracts.some(
+      ({ document_id, text }) =>
+        document_id === charter.id &&
+        text.includes("Runtime Community Association"),
+    ),
+  );
   assert.ok(preflightAttempts.every(({ model }) => model === ordinaryModel));
   assert.equal(writingAttempts[0]?.model, neonModel);
   assert.equal(
     writingAttempts[0]?.body.generationConfig.thinkingConfig?.thinkingLevel,
-    "MEDIUM",
+    "LOW",
   );
   if (!live) assert.equal(writingAttempts.length, 1);
   const writingModel = writingAttempts.at(-1)?.model;
@@ -670,7 +915,7 @@ try {
     .click();
   await expect
     .poll(() => state.claims, { timeout: live ? 300000 : 60000 })
-    .toBe(7);
+    .toBe(8);
   await expect
     .poll(() => state.grants.length, { timeout: live ? 300000 : 60000 })
     .toBeGreaterThan(1);
@@ -688,30 +933,194 @@ try {
           !grant.source_url.includes("grounding-api-redirect"),
       ),
   );
-  if (live) assert.ok(state.modelCalls >= 7);
-  else assert.equal(state.modelCalls, 8);
-  assert.ok(
-    state.payloads
-      .slice(callsBeforeSearch)
-      .every(({ model }) => model === ordinaryModel),
-  );
-  assert.ok(
-    quick ? state.polls >= 7 : live ? state.polls >= 7 : state.polls > 7,
-  );
+  const discoveryCalls = state.payloads.slice(callsBeforeSearch);
+  if (!live) {
+    const grounded = discoveryCalls.filter(({ body }) => body.tools);
+    assert.equal(grounded.length, 4);
+    for (const lane of ["local", "sector", "foundations"])
+      assert.ok(
+        grounded.some(({ body }) =>
+          body.contents[0].parts[0].text.startsWith(`Search lane ${lane}`),
+        ),
+      );
+    const verification = grounded[3].body;
+    const verificationPrompt = verification.contents[0].parts[0].text;
+    assert.ok(verificationPrompt.startsWith("Verify this shortlist"));
+    assert.ok(verification.tools.some((tool) => tool.googleSearch));
+    assert.ok(verification.tools.some((tool) => tool.urlContext));
+    assert.ok(verificationPrompt.includes(discoveryFixture.officialUrl));
+    assert.ok(!verificationPrompt.includes(discoveryFixture.preliminaryUrl));
+    const extraction = discoveryCalls.at(-1).body;
+    assert.ok(
+      extraction.generationConfig.responseSchema.properties.opportunities,
+    );
+    assert.ok(
+      JSON.stringify(extraction.contents).includes(
+        discoveryFixture.openEvidence,
+      ),
+    );
+    assert.ok(
+      !JSON.stringify(extraction.contents).includes(
+        discoveryFixture.preliminaryUrl,
+      ),
+    );
+    assert.ok(
+      JSON.stringify(extraction.contents).includes(
+        discoveryFixture.officialUrl,
+      ),
+    );
+    assert.equal(state.grants.length, 4);
+    const rolling = state.grants.find(
+      ({ title }) => title === discoveryFixture.title,
+    );
+    assert.ok(rolling, "The rolling workshop opportunity should be saved");
+    assert.equal(rolling.source_url, discoveryFixture.officialUrl);
+    assert.ok(state.discoveryRedirects > 0);
+    assert.equal(
+      rolling.provenance.sources.some(
+        ({ uri }) => uri === discoveryFixture.preliminaryUrl,
+      ),
+      false,
+    );
+    const dated = state.grants.find(
+      ({ title }) => title === discoveryFixture.datedTitle,
+    );
+    assert.ok(dated, "The dated workshop opportunity should be saved");
+    assert.equal(dated.opens_on, null);
+    assert.equal(dated.closes_at, null);
+    assert.equal(dated.provenance.closing_date, null);
+    assert.equal(dated.provenance.round_status, "unknown");
+    assert.equal(dated.provenance.fit, "check");
+    assert.equal(dated.provenance.round_status_check_required, true);
+    const datedCard = page
+      .getByRole("article")
+      .filter({ hasText: discoveryFixture.datedTitle });
+    await expect(datedCard).toContainText("Check current status");
+    await expect(datedCard).toContainText("Check deadline");
+    const retrievedDate = state.grants.find(
+      ({ title }) => title === discoveryFixture.retrievedDateTitle,
+    );
+    assert.ok(
+      retrievedDate,
+      "The retrieved workshop opportunity should be saved",
+    );
+    assert.equal(retrievedDate.closes_at, null);
+    assert.equal(
+      retrievedDate.provenance.closing_date,
+      discoveryFixture.deadlineDate,
+    );
+    await expect(
+      page.getByRole("heading", { name: discoveryFixture.title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(discoveryFixture.closedTitle, { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText(discoveryFixture.equipmentTitle, { exact: true }),
+    ).toHaveCount(0);
+  }
+  assert.ok(discoveryCalls.every(({ model }) => model === ordinaryModel));
+  assert.ok(quick || live ? state.polls >= 8 : state.polls > 8);
   for (const { body, timeout } of state.payloads) {
     const verification =
       !!body.generationConfig?.responseSchema?.properties?.recovered_profile;
     const maxTimeout = verification ? 120 : 90;
     assert.ok(Number(timeout) > 0 && Number(timeout) <= maxTimeout);
-    if (!live) assert.equal(Number(timeout), maxTimeout);
+    if (!live && !body.tools) assert.equal(Number(timeout), maxTimeout);
   }
   console.log(
-    `PASS: built browser search → signed extraction → persisted canonical source; ${state.modelCalls} model attempts / seven quota claims, polling never charges`,
+    `PASS: built browser search lanes → signed verification → extracted and saved canonical source; ${state.modelCalls} model attempts / eight quota claims, polling never charges`,
   );
   await page.screenshot({
     path: join(root, "search-results.png"),
     fullPage: true,
   });
+  if (!live) {
+    const reportId = randomUUID();
+    const storagePath = `${orgId}/${reportId}/${grantReportFixture.fileName}`;
+    const bytes = Buffer.from(grantReportFixture.fileText);
+    tables.documents.push({
+      id: reportId,
+      org_id: orgId,
+      category: "grant_research",
+      name: grantReportFixture.fileName,
+      storage_path: storagePath,
+      mime_type: "text/plain",
+      size_bytes: bytes.length,
+      verified: false,
+      created_at: new Date().toISOString(),
+    });
+    objects.set(`simple-grant-documents/${storagePath}`, {
+      bytes,
+      type: "text/plain",
+      created_at: new Date().toISOString(),
+    });
+    const countBefore = state.grants.length;
+    const claimsBefore = state.claims;
+    const readsBefore = state.payloads.length;
+    const previewResponse = await completedAIJob(
+      {
+        action: "import-grant",
+        importStage: "preview",
+        text: grantReportFixture.pastedText,
+        documentIds: [reportId],
+      },
+      20,
+    );
+    const preview = await previewResponse.json();
+    assert.equal(previewResponse.status, 200, JSON.stringify(preview));
+    assert.equal(preview.importCandidates.length, 2);
+    assert.equal(state.grants.length, countBefore);
+    const providerSources = JSON.stringify(
+      state.payloads[readsBefore].body.contents,
+    );
+    assert.ok(providerSources.includes(grantReportFixture.fileName));
+    assert.ok(providerSources.includes(grantReportFixture.pastedText));
+    assert.ok(providerSources.includes(grantReportFixture.fileText));
+    const selection = {
+      action: "import-grant",
+      importStage: "save",
+      orgId,
+      importCandidates: preview.importCandidates,
+      selectedIndexes: [
+        preview.importCandidates.findIndex(
+          ({ title }) => title === grantReportFixture.selectedTitle,
+        ),
+      ],
+      sourceFingerprint: preview.sourceFingerprint,
+      stageIssuedAt: preview.stageIssuedAt,
+    };
+    async function saveReport() {
+      const response = await originalFetch(`${site}/api/ai`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "X-Simple-Grants-Async": "1",
+        },
+        body: JSON.stringify(selection),
+      });
+      const result = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(result));
+      return result;
+    }
+    const saved = await saveReport();
+    assert.equal(saved.importedCount, 1);
+    assert.equal(
+      saved.opportunities[0].title,
+      grantReportFixture.selectedTitle,
+    );
+    assert.equal(saved.opportunities[0].closes_at, null);
+    assert.equal(saved.opportunities[0].provenance.closing_date, "2027-03-31");
+    assert.equal(saved.opportunities[0].provenance.source_verified, false);
+    assert.equal((await saveReport()).duplicateCount, 1);
+    assert.equal(state.grants.length, countBefore + 1);
+    assert.equal(state.claims, claimsBefore + 1);
+    assert.equal(state.payloads.length, readsBefore + 1);
+    console.log(
+      "PASS: external report preview reads pasted notes and the selected upload without saving, then only saves the confirmed lead and skips a repeated save",
+    );
+  }
   // Controlled transport faults also traverse the real SDK, worker and polling.
   const grantsBeforeErrors = state.grants.length;
   for (const [status, code] of [
@@ -853,9 +1262,7 @@ try {
     ).toHaveCount(0);
     for (const { name } of setupSourceFacts)
       await wizard.getByRole("checkbox", { name, exact: true }).check();
-    await wizard
-      .getByRole("button", { name: "Analyse pending sources" })
-      .click();
+    await wizard.getByRole("button", { name: "Suggest answers" }).click();
     await expect(wizard).toHaveAccessibleName("Review grant setup answers", {
       timeout: 30000,
     });
@@ -873,8 +1280,14 @@ try {
     await expect(
       legalName.getByText("Sources disagree. Which answer applies?"),
     ).toBeVisible();
-    for (const { quote } of setupSourceFacts)
+    for (const { value, quote } of setupSourceFacts) {
+      await legalName
+        .locator(".grant-setup-alternative")
+        .filter({ hasText: value })
+        .getByText("View source", { exact: true })
+        .click();
       await expect(legalName.getByText(quote, { exact: true })).toBeVisible();
+    }
     await expect(
       legalName
         .locator(".grant-setup-alternative")
@@ -1018,8 +1431,6 @@ try {
   console.log(
     "PASS: corrupt DOCX rejected through background execution without a quota/model claim",
   );
-  await Promise.all(state.workers);
-  assert.deepEqual(state.errors, []);
   await page.screenshot({
     path: join(root, "verified-ui.png"),
     fullPage: true,
@@ -1029,23 +1440,4 @@ try {
     0,
     `Live Neon could not be verified because Flash handled ${liveFallbacks.join(" and ")}.`,
   );
-  console.log(
-    `PASS: packaged AI runtime/browser suite complete. Evidence: ${root}`,
-  );
-} catch (error) {
-  if (browser) {
-    const pages = browser.contexts().flatMap((context) => context.pages());
-    if (pages[0])
-      await pages[0].screenshot({
-        path: join(root, "failure.png"),
-        fullPage: true,
-      });
-  }
-  console.error(`Runtime test evidence: ${root}`);
-  throw error;
-} finally {
-  globalThis.fetch = originalFetch;
-  if (browser) await browser.close();
-  await new Promise((resolve) => server.close(resolve));
-  // Keep failure screenshots/log evidence in a private temporary directory.
 }

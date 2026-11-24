@@ -109,19 +109,23 @@ export function requiredDocumentCategories(requirements: string[]) {
     needed.add("acnc");
   return [...needed];
 }
+export function draftSourceBlockers(org: Organisation, guidelines: string) {
+  const blockers: string[] = [];
+  if (org.verification_status !== "approved")
+    blockers.push("Review and approve your organisation profile first.");
+  if (guidelines.trim().length < 80)
+    blockers.push(
+      "Upload or paste the official program guidelines before drafting.",
+    );
+  return blockers;
+}
 export function draftBlockers(
   org: Organisation,
   grant: Opportunity,
   documents: DocumentRecord[],
   now = new Date(),
 ) {
-  const blockers: string[] = [];
-  if (org.verification_status !== "approved")
-    blockers.push("Review and approve your organisation profile first.");
-  if (grant.guidelines_text.trim().length < 80)
-    blockers.push(
-      "Upload or paste the official program guidelines before drafting.",
-    );
+  const blockers = draftSourceBlockers(org, grant.guidelines_text);
   const sourceBlockers = draftEvidenceBlockers(
     grant.guidelines_text,
     documents,
@@ -310,6 +314,7 @@ export function projectFactsForAI(
             "application_research",
             "research_sources_confirmed",
             "submission_confirmation",
+            "source_document_ids",
           ].includes(field),
       ),
     ),

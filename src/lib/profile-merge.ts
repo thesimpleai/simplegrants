@@ -1,4 +1,5 @@
 import type { Profile, ReviewCheck } from "../types";
+import { australianIdentifierDigits } from "./profile-values";
 
 const listFields = new Set([
   "focus_areas",
@@ -29,6 +30,15 @@ const equivalent = (left: unknown, right: unknown) =>
   (typeof left === "string" &&
     typeof right === "string" &&
     normalise(left) === normalise(right));
+
+function equivalentProfileValue(field: string, left: unknown, right: unknown) {
+  if (equivalent(left, right)) return true;
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const digits = australianIdentifierDigits(field, left);
+  return (
+    digits !== undefined && digits === australianIdentifierDigits(field, right)
+  );
+}
 function identity(field: string, row: Record<string, unknown>): string {
   if (field === "activities") return normalise(row.name);
   if (field === "milestones")
@@ -123,7 +133,10 @@ export function mergeReviewedProfile(
       }
       profile[field] = rows;
     } else {
-      if (candidate !== undefined && !equivalent(previous, candidate))
+      if (
+        present(candidate) &&
+        !equivalentProfileValue(field, previous, candidate)
+      )
         conflict(field, candidate);
       profile[field] = previous;
     }

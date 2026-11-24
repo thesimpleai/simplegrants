@@ -14,7 +14,7 @@ export function isGroundingRedirect(raw: string): boolean {
     return false;
   }
 }
-function publicSource(raw: string): string | null {
+export function publicSource(raw: string): string | null {
   const safe = safeHttpsUrl(raw);
   if (!safe) return null;
   const url = new URL(safe);

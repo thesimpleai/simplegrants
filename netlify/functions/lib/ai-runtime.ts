@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ZodError } from "zod";
 import { HttpError, json } from "./core";
 
 export type AIFailure = "timeout" | "response";
@@ -368,6 +369,22 @@ export function aiFailureResponse(
     providerStatus: providerStatus ?? "OTHER",
     failureReason,
     ...providerDiagnostics(error),
+    ...(error instanceof ZodError && stage === "draft_generate"
+      ? {
+          invalidFields: error.issues.slice(0, 8).map(({ path, code }) => ({
+            path: path
+              .map((part) =>
+                typeof part === "number"
+                  ? "[]"
+                  : typeof part === "string" && /^[a-z_]{1,32}$/.test(part)
+                    ? part
+                    : "?",
+              )
+              .join("."),
+            code,
+          })),
+        }
+      : {}),
     ...(error instanceof AIExecutionError && error.usage
       ? {
           ...Object.fromEntries(

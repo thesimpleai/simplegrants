@@ -1,5 +1,6 @@
 import type { DocumentRecord, Profile } from "../types";
 import { documentedProfileDate, profileDateOnly } from "./profile-dates";
+import { australianIdentifierDigits, profileState } from "./profile-values";
 
 export type SetupQuestionKind = "text" | "list" | "boolean" | "date" | "metric";
 export type SetupDatedMetric = {
@@ -157,7 +158,7 @@ export const setupQuestionnaire = [
   ),
   ...section(
     "Purpose and community",
-    ["other", "registration", "acnc"],
+    ["mission", "background", "other", "registration", "acnc"],
     [
       "Public annual report",
       "Strategic plan",
@@ -237,7 +238,7 @@ export const setupQuestionnaire = [
   ),
   ...section(
     "Governance and delivery",
-    ["other", "registration", "acnc"],
+    ["background", "other", "registration", "acnc"],
     [
       "Constitution",
       "Public governance summary",
@@ -324,7 +325,7 @@ export const setupQuestionnaire = [
   ),
   ...section(
     "Financial readiness",
-    ["other"],
+    ["financial_summary", "other"],
     [
       "Public annual report or published financial summary",
       "Manually entered statement or redacted excerpt",
@@ -363,7 +364,7 @@ export const setupQuestionnaire = [
   ),
   ...section(
     "Capacity and track record",
-    ["other"],
+    ["background", "financial_summary", "other"],
     [
       "Public annual report",
       "Redacted program or workforce summary",
@@ -543,13 +544,38 @@ const normalisedText = (value: string) =>
     .trim()
     .replace(/\s+/g, " ");
 
-function answerKey(question: SetupQuestion, value: SetupAnswerValue) {
-  if (typeof value === "string")
+const regulatorNames = new Map([
+  ["australian securities and investments commission", "asic"],
+  ["australian securities & investments commission", "asic"],
+  ["australian charities and not-for-profits commission", "acnc"],
+  ["australian charities & not-for-profits commission", "acnc"],
+]);
+
+export function setupAnswerComparisonKey(
+  question: SetupQuestion,
+  value: SetupAnswerValue,
+) {
+  if (typeof value === "string") {
+    const digits = australianIdentifierDigits(question.key, value);
+    if (digits !== undefined) return JSON.stringify(["identifier", digits]);
+    if (question.key === "base_state")
+      return JSON.stringify(profileState(value));
+    // URL paths and query values can be case-sensitive.
+    if (question.key === "website") {
+      const website = value.trim();
+      try {
+        return JSON.stringify(new URL(website).href);
+      } catch {
+        return JSON.stringify(website);
+      }
+    }
+    const text = normalisedText(value);
     return JSON.stringify(
-      question.key === "abn"
-        ? value.replace(/\s+/g, "")
-        : normalisedText(value),
+      question.key === "registration_authority"
+        ? (regulatorNames.get(text) ?? text)
+        : text,
     );
+  }
   if (typeof value === "boolean") return JSON.stringify(value);
   if (Array.isArray(value))
     return JSON.stringify([...new Set(value.map(normalisedText))].sort());
@@ -637,7 +663,7 @@ export function aggregateSetupEvidence(
       byQuestion.get(suggestion.questionKey) ??
       new Map<string, SetupEvidenceAlternative>();
     byQuestion.set(suggestion.questionKey, alternatives);
-    const key = answerKey(question, suggestion.value);
+    const key = setupAnswerComparisonKey(question, suggestion.value);
     const existing = alternatives.get(key);
     if (!existing) {
       if (alternatives.size < 12)
@@ -645,13 +671,15 @@ export function aggregateSetupEvidence(
           value: suggestion.value,
           suggestions: [suggestion],
         });
-    } else if (
-      existing.suggestions.length < 8 &&
-      !existing.suggestions.some(
+    } else {
+      const matching = existing.suggestions.findIndex(
         (source) => sourceKey(source) === sourceKey(suggestion),
-      )
-    ) {
-      existing.suggestions.push(suggestion);
+      );
+      if (matching === -1 && existing.suggestions.length < 8) {
+        existing.suggestions.push(suggestion);
+      } else if (matching >= 0 && suggestion.quoteVerified) {
+        existing.suggestions[matching] = suggestion;
+      }
     }
   }
   return Object.fromEntries(
@@ -681,14 +709,14 @@ export function chooseSetupAnswer(
     return question.allowsNotApplicable ? { status: "not_applicable" } : null;
   if (!isSetupAnswerValue(question, choice.value)) return null;
   const value = cleanAnswer(choice.value);
-  const key = answerKey(question, value);
+  const key = setupAnswerComparisonKey(question, value);
   const sources = alternatives
     .flatMap((alternative) => alternative.suggestions)
     .filter(
       (source) =>
         isSetupSuggestion(source) &&
         source.questionKey === question.key &&
-        answerKey(question, source.value) === key,
+        setupAnswerComparisonKey(question, source.value) === key,
     )
     .map(cleanSuggestion);
   return {
@@ -763,6 +791,7 @@ export function suggestSetupDocuments(
         )
           return false;
         const name = document.name.replace(/[_-]+/g, " ");
+        if (category === "financial_summary") return true;
         return (
           !privateFinanceName.test(name) &&
           (question.section !== "Financial readiness" ||

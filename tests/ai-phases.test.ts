@@ -13,6 +13,7 @@ vi.mock("@google/genai", () => ({
   ThinkingLevel: { MINIMAL: "MINIMAL", LOW: "LOW", MEDIUM: "MEDIUM" },
 }));
 import handler from "../netlify/functions/ai";
+import { AIExecutionError } from "../netlify/functions/lib/ai-runtime";
 const orgId = "6a03978d-6266-46b6-b35e-bf8069e50743",
   grantId = "6a03978d-6266-46b6-b35e-bf8069e50744",
   appId = "6a03978d-6266-46b6-b35e-bf8069e50745";
@@ -107,17 +108,37 @@ function call(extra: Record<string, unknown> = {}) {
 function model(data: unknown) {
   mocks.generateContent.mockResolvedValueOnce({ text: JSON.stringify(data) });
 }
-function search() {
+function grounded(
+  uri = source,
+  text = "Source-backed community grant. Confirm provider eligibility.",
+  additional: string[] = [],
+  retrieved: string[] = [],
+) {
   mocks.generateContent.mockResolvedValueOnce({
-    text: "Source-backed community grant. Confirm provider eligibility.",
+    text,
     candidates: [
       {
         groundingMetadata: {
-          groundingChunks: [{ web: { title: "Provider", uri: source } }],
+          groundingChunks: [uri, ...additional].map((link) => ({
+            web: { title: "Provider", uri: link },
+          })),
+        },
+        urlContextMetadata: {
+          urlMetadata: retrieved.map((retrievedUrl) => ({
+            retrievedUrl,
+            urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS",
+          })),
         },
       },
     ],
   });
+}
+function search() {
+  for (const lane of ["local", "sector", "foundations"])
+    grounded(
+      source,
+      `Source-backed ${lane} grant. Confirm provider eligibility.`,
+    );
 }
 function validDraft() {
   return {
@@ -127,6 +148,7 @@ function validDraft() {
         question: "Describe the project",
         answer: "Four community gardening workshops.",
         word_limit: 100,
+        coverage: "partial",
         evidence: ["Project brief"],
         needs_review: true,
       },
@@ -138,6 +160,15 @@ function validDraft() {
         notes: "Recorded project budget",
       },
     ],
+    readiness_review: {
+      criteria: { coverage: "partial", note: "Project scope needs review." },
+      delivery: {
+        coverage: "partial",
+        note: "Workshop dates need confirmation.",
+      },
+      budget: { coverage: "partial", note: "Some costs are estimates." },
+      suggestions: [],
+    },
     missing_information: [],
     submission_checklist: ["Authorised review"],
     human_review_required: true,
@@ -226,7 +257,7 @@ describe("signed, separate grant discovery phases", () => {
     );
   });
   it("gives a search-specific timeout message without document advice", async () => {
-    mocks.generateContent.mockRejectedValueOnce(
+    mocks.generateContent.mockRejectedValue(
       Object.assign(new Error("deadline"), { status: 504 }),
     );
     const response = await call({ discoveryStage: "search" });
@@ -235,17 +266,37 @@ describe("signed, separate grant discovery phases", () => {
     expect(body.error).toContain("grant search took too long");
     expect(body.error).not.toContain("documents");
     const request = mocks.generateContent.mock.calls[0][0];
-    expect(request.config.maxOutputTokens).toBe(1536);
-    expect(request.contents).toContain("up to 3");
+    expect(request.config.maxOutputTokens).toBe(6144);
+    expect(request.contents).toContain("Search lane local");
   });
-  it("uses one call in search without writes, then one extraction call and final scoped insert", async () => {
+  it("searches in three lanes, rechecks the shortlist, then saves from the verified source", async () => {
     search();
     const first = await call({ discoveryStage: "search" });
     const state = await first.json();
     expect(first.status).toBe(200);
     expect(state.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(state.stageIssuedAt).toBe(Date.now());
-    expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+    expect(state.searchDraft).toMatchObject({
+      phase: "search",
+      completed_lanes: 3,
+      failed_lanes: 0,
+      sources: [{ uri: source }],
+    });
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3);
+    expect(mocks.write).not.toHaveBeenCalled();
+    const verifiedSource = "https://funder.example.au/current-program/2027";
+    grounded(
+      verifiedSource,
+      "The provider lists this 2027 round and close date.",
+    );
+    const verified = await call({ discoveryStage: "verify", ...state });
+    expect(verified.status).toBe(200);
+    const verifiedState = await verified.json();
+    expect(verifiedState.searchDraft).toMatchObject({
+      phase: "verified",
+      sources: [{ uri: verifiedSource }],
+    });
+    expect(mocks.generateContent).toHaveBeenCalledTimes(4);
     expect(mocks.write).not.toHaveBeenCalled();
     model({
       opportunities: [
@@ -256,26 +307,248 @@ describe("signed, separate grant discovery phases", () => {
           source_index: 0,
           opens_on: "2027-01-01",
           closes_at: "2027-02-01T17:00:00+11:00",
+          round_status: "upcoming",
+          fit: "potential",
           amount_min: null,
           amount_max: 10000,
         },
       ],
     });
-    const second = await call({ discoveryStage: "extract", ...state });
+    const second = await call({ discoveryStage: "extract", ...verifiedState });
     expect(second.status).toBe(200);
-    expect((await second.json()).opportunities).toHaveLength(1);
-    expect(mocks.generateContent).toHaveBeenCalledTimes(2);
+    expect((await second.json()).opportunities).toMatchObject([
+      {
+        source_url: verifiedSource,
+        opens_on: null,
+        closes_at: null,
+        provenance: {
+          round_status: "unknown",
+          round_status_check_required: true,
+          fit: "check",
+          closing_date: null,
+          deadline_note:
+            "Check the current round and dates in the funder's application form.",
+          sources: [{ uri: verifiedSource }],
+        },
+      },
+    ]);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(5);
     expect(mocks.write).toHaveBeenCalledTimes(1);
     expect(
       mocks.generateContent.mock.calls.map(([request]) => request.model),
-    ).toEqual(["gemini-flash-latest", "gemini-flash-latest"]);
+    ).toEqual(Array(5).fill("gemini-flash-latest"));
     expect(mocks.rpc.mock.calls).toEqual([
+      ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
       ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
       ["claim_ai_request", { p_org_id: orgId, p_action: "discover" }],
     ]);
     expect(
-      mocks.generateContent.mock.calls[1][0].config.responseSchema,
+      mocks.generateContent.mock.calls[4][0].config.responseSchema,
     ).toHaveProperty("properties.opportunities");
+  });
+  it("preserves successful lanes when another lane lacks grounding", async () => {
+    grounded(source, "Local round");
+    mocks.generateContent.mockResolvedValueOnce({
+      text: "Uncited recommendations",
+    });
+    grounded("https://funder.example.au/foundation", "Foundation round");
+    const response = await call({ discoveryStage: "search" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).searchDraft).toMatchObject({
+      phase: "search",
+      completed_lanes: 2,
+      failed_lanes: 1,
+      sources: [
+        { uri: source },
+        { uri: "https://funder.example.au/foundation" },
+      ],
+    });
+  });
+  it("retrieves concrete provider pages and excludes generic or superseded citations and incompatible work", async () => {
+    const portal = "https://council.smartygrants.com.au/";
+    const oldForm = "https://council.example.au/2024-application-preview.pdf";
+    const actual = "https://council.smartygrants.com.au/CommunityRound2027";
+    for (const _lane of ["local", "sector", "foundations"])
+      grounded(portal, "Provider leads", [oldForm, actual]);
+    const preliminary = await call({ discoveryStage: "search" });
+    expect(preliminary.status).toBe(200);
+    grounded(
+      portal,
+      "The portal links the current official round.",
+      [oldForm, actual],
+      [portal, oldForm, actual],
+    );
+    const response = await call({
+      discoveryStage: "verify",
+      ...(await preliminary.json()),
+    });
+    expect(response.status).toBe(200);
+    const verified = await response.json();
+    expect(verified.searchDraft.sources).toEqual([
+      { title: "Provider", uri: actual, retrieved: true },
+    ]);
+    const request = mocks.generateContent.mock.calls[3][0];
+    expect(request.config.tools).toEqual([
+      { googleSearch: {} },
+      { urlContext: {} },
+    ]);
+    expect(request.contents).toContain(`\n${actual}\n`);
+    expect(request.contents).not.toContain(oldForm);
+    expect(request.contents).not.toContain(`\n${portal}\n`);
+
+    model({
+      opportunities: [
+        {
+          title: "Physical works only",
+          funder: "Provider",
+          summary: "The location fits, but funding only covers construction",
+          source_index: 0,
+          round_status: "open",
+          fit: "potential",
+          project_fit: "ineligible",
+        },
+        {
+          title: "Community workshops",
+          funder: "Provider",
+          summary: "Workshops are eligible",
+          source_index: 0,
+          round_status: "open",
+          fit: "potential",
+          project_fit: "supported",
+          closing_date: "2027-01-31",
+          closes_at: "2027-01-31T17:00:00+11:00",
+        },
+        {
+          title: "Program with disputed application dates",
+          funder: "Provider",
+          summary: "Workshops are eligible",
+          source_index: 0,
+          round_status: "open",
+          closing_date: "2027-01-31",
+          closes_at: "2027-01-31T17:00:00+11:00",
+          date_conflict: true,
+          deadline_note:
+            "The application form and funder disagree on the date.",
+        },
+      ],
+    });
+    const extracted = await call({ discoveryStage: "extract", ...verified });
+    expect(extracted.status).toBe(200);
+    expect((await extracted.json()).opportunities).toMatchObject([
+      {
+        title: "Community workshops",
+        source_url: actual,
+        closes_at: "2027-01-31T06:00:00.000Z",
+        provenance: { sources: [{ uri: actual, retrieved: true }] },
+      },
+      {
+        title: "Program with disputed application dates",
+        closes_at: null,
+        provenance: {
+          closing_date: null,
+          date_review_required: true,
+          deadline_note:
+            "The application form and funder disagree on the date.",
+        },
+      },
+    ]);
+  });
+  it.each([
+    Object.assign(new Error("Unsupported tool combination"), { status: 400 }),
+    new AIExecutionError("timeout"),
+  ])(
+    "checks exact URLs when combined verification fails within budget",
+    async (error) => {
+      search();
+      const first = await call({ discoveryStage: "search" });
+      expect(first.status).toBe(200);
+      mocks.generateContent.mockRejectedValueOnce(error);
+      grounded(source, "Retrieved current form", [], [source]);
+      const checked = await call({
+        discoveryStage: "verify",
+        ...(await first.json()),
+      });
+      expect(checked.status).toBe(200);
+      expect(mocks.generateContent.mock.calls[4][0].config.tools).toEqual([
+        { urlContext: {} },
+      ]);
+      expect((await checked.json()).searchDraft.sources).toMatchObject([
+        { uri: source, retrieved: true },
+      ]);
+    },
+  );
+  it("omits hard DGR mismatches and keeps a disputed time as a date-only auspice lead", async () => {
+    org.profile = {
+      name: "Community Club",
+      source_evidence: [{ quote: "Private association evidence" }],
+      grant_setup: {
+        version: 1,
+        answers: {
+          dgr_endorsed: { status: "confirmed", value: false },
+          service_locations: { status: "confirmed", value: ["Warrandyte"] },
+          financial_controls: {
+            status: "confirmed",
+            value: "Private bank details",
+          },
+        },
+      },
+    };
+    search();
+    const first = await call({ discoveryStage: "search" });
+    const state = await first.json();
+    expect(first.status).toBe(200);
+    const localPrompt = mocks.generateContent.mock.calls[0][0].contents;
+    expect(localPrompt).toContain('"dgr_endorsed":false');
+    expect(localPrompt).toContain("Warrandyte");
+    expect(localPrompt).not.toContain("Private");
+    grounded(source, "Retrieved current funder page", [], [source]);
+    const verified = await call({ discoveryStage: "verify", ...state });
+    const verifiedState = await verified.json();
+    expect(verified.status).toBe(200);
+    model({
+      opportunities: [
+        {
+          title: "Direct DGR round",
+          funder: "Provider",
+          summary: "Direct DGR eligibility",
+          source_index: 0,
+          dgr_requirement: "direct",
+          fit: "potential",
+          round_status: "open",
+        },
+        {
+          title: "Eligible auspice round",
+          funder: "Provider",
+          summary: "An eligible auspice can apply",
+          source_index: 0,
+          dgr_requirement: "auspice_allowed",
+          fit: "potential",
+          round_status: "open",
+          closing_date: "2027-01-31",
+          closes_at: "2027-01-31T17:00:00+11:00",
+          deadline_conflict: true,
+          deadline_note: "Two official pages show different closing times.",
+        },
+      ],
+    });
+    const response = await call({
+      discoveryStage: "extract",
+      ...verifiedState,
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).opportunities).toMatchObject([
+      {
+        title: "Eligible auspice round",
+        closes_at: null,
+        provenance: {
+          closing_date: "2027-01-31",
+          deadline_note: "Two official pages show different closing times.",
+          date_review_required: true,
+          fit: "check",
+          fit_note: "Confirm an eligible auspice before applying.",
+        },
+      },
+    ]);
   });
   it.each([
     "state",
@@ -303,7 +576,7 @@ describe("signed, separate grant discovery phases", () => {
         ...(what === "org" ? { orgId: org.id } : {}),
       });
       expect(response.status).toBe(409);
-      expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+      expect(mocks.generateContent).toHaveBeenCalledTimes(3);
       expect(mocks.write).not.toHaveBeenCalled();
     },
   );
@@ -329,7 +602,7 @@ describe("signed, separate grant discovery phases", () => {
     expect((await call({ discoveryStage: "extract", ...state })).status).toBe(
       403,
     );
-    expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3);
   });
 });
 describe("signed, separate application preparation", () => {
@@ -422,8 +695,8 @@ describe("signed, separate application preparation", () => {
     expect(mocks.generateContent.mock.calls[1][0]).toMatchObject({
       model: "gemini-4-neon",
       config: {
-        thinkingConfig: { thinkingLevel: "MEDIUM" },
-        maxOutputTokens: 6144,
+        thinkingConfig: { thinkingLevel: "LOW" },
+        maxOutputTokens: 16_384,
       },
     });
     expect(mocks.generateContent.mock.calls[1][0].config).not.toHaveProperty(
@@ -536,6 +809,24 @@ describe("signed, separate application preparation", () => {
     expect(application.draft).toEqual({
       manual_text: "Concurrent reviewed submission",
     });
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+  it("keeps the saved application when a provider omits its readiness assessment", async () => {
+    const state = await preflight();
+    const { readiness_review, ...withoutReview } = validDraft();
+    model(withoutReview);
+    const response = await call({
+      action: "draft",
+      draftStage: "generate",
+      opportunityId: grantId,
+      applicationId: appId,
+      ...state,
+    });
+    expect(response.status).toBe(502);
+    expect((await response.json()).code).toBe("SG_AI_RESPONSE");
+    expect(
+      mocks.generateContent.mock.calls[1][0].config.responseSchema.required,
+    ).toContain("readiness_review");
     expect(mocks.write).not.toHaveBeenCalled();
   });
   it("never writes malformed generated applications", async () => {
