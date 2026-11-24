@@ -48,6 +48,13 @@ beforeEach(() => {
         return new Response(JSON.stringify([{ role: "member" }]), { headers });
       if (path === "/rest/v1/documents")
         return new Response(JSON.stringify([document]), { headers });
+      if (path === "/rest/v1/document_text_extracts") {
+        if (request.method === "POST") {
+          const { text, method } = await request.clone().json();
+          return new Response(JSON.stringify([{ text, method }]), { headers });
+        }
+        return new Response("[]", { headers });
+      }
       if (path.startsWith("/rest/v1/rpc/"))
         return new Response("true", { headers });
       if (path.startsWith("/rest/v1/")) return new Response("[]", { headers });
@@ -92,7 +99,15 @@ for (const mode of ["authenticated", "service"] as const) {
         { p_org_id: orgId },
       );
       expect(rpc.error).toBeNull();
-      const parts = await documentParts(client, orgId, [documentId]);
+      const parts = await documentParts(
+        client,
+        orgId,
+        [documentId],
+        undefined,
+        {
+          prepareText: true,
+        },
+      );
       expect(parts.parts).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ text: "Community history." }),
@@ -110,15 +125,33 @@ for (const mode of ["authenticated", "service"] as const) {
         );
         expect(profile).toBe(DB_SCHEMA);
         expect(profile).not.toBe("public");
+        const cache =
+          new URL(request.url).pathname === "/rest/v1/document_text_extracts";
+        const service = mode === "service" || cache;
         expect(request.headers.get("apikey")).toBe(
-          mode === "service" ? "test-server-only-key" : "test-public-key",
+          service ? "test-server-only-key" : "test-public-key",
         );
         expect(request.headers.get("authorization")).toBe(
-          mode === "service"
-            ? "Bearer test-server-only-key"
-            : "Bearer test-user-jwt",
+          service ? "Bearer test-server-only-key" : "Bearer test-user-jwt",
         );
       }
+      const extractRequests = rest.filter((request) =>
+        new URL(request.url).pathname.endsWith("/document_text_extracts"),
+      );
+      expect(extractRequests.map((request) => request.method)).toEqual([
+        "GET",
+        "POST",
+      ]);
+      const filters = new URL(extractRequests[0].url).searchParams;
+      expect(filters.get("org_id")).toBe(`eq.${orgId}`);
+      expect(filters.get("document_id")).toBe(`eq.${documentId}`);
+      expect(filters.get("source_sha256")).toMatch(/^eq\.[a-f0-9]{64}$/);
+      expect(await extractRequests[1].json()).toMatchObject({
+        org_id: orgId,
+        document_id: documentId,
+        text: "Community history.",
+        method: "local",
+      });
       const writes = rest.filter((request) => request.method === "POST");
       expect(
         writes.some((request) =>

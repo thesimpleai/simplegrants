@@ -175,8 +175,8 @@ storage:{from:bucket=>({upload:async(path,file,options)=>{const response=await f
     const body = route.request().postDataJSON();
     state.inserts.push(body);
     state.documents.push({
-      ...body,
       id: `00000000-0000-4000-8000-${String(state.inserts.length).padStart(12, "0")}`,
+      ...body,
       created_at: "2026-11-01T00:00:00Z",
     });
     return route.fulfill({ json: { error: null } });
@@ -251,6 +251,153 @@ async function openProfile(
     .fill(text);
 }
 
+test("grant setup accepts a website and manual answers without any uploads or AI calls", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page, []);
+  await page.route("**/api/ai", (route) => {
+    state.ai.push(route.request().postDataJSON());
+    return route.fulfill({
+      status: 500,
+      json: { error: "Manual setup should not request AI" },
+    });
+  });
+  await page.goto("/?view=organisation");
+  await page.getByRole("button", { name: "Set up for grants" }).click();
+  const wizard = page.getByRole("dialog");
+  for (const label of [
+    "Upload ASIC or incorporation documents",
+    "Upload ACNC registration",
+    "Upload financial reports",
+    "Upload insurance certificates",
+    "Upload mission or strategy documents",
+    "Upload organisation background",
+  ])
+    await expect(
+      wizard.getByRole("button", { name: label, exact: true }),
+    ).toBeEnabled();
+  await expect(
+    wizard.getByRole("button", { name: "Suggest answers" }),
+  ).toBeDisabled();
+  await expect(
+    wizard.getByRole("textbox", { name: "Paste a public or redacted excerpt" }),
+  ).toBeHidden();
+  await wizard
+    .getByRole("textbox", { name: "Organisation website", exact: true })
+    .fill("example.org.au");
+  await wizard.getByRole("button", { name: "Enter answers manually" }).click();
+  await expect(wizard).toHaveAccessibleName("Review grant setup answers");
+  const legalName = wizard.getByRole("textbox", {
+    name: "What is your registered legal name?",
+  });
+  if (!(await legalName.isVisible()))
+    await wizard
+      .getByText("Legal identity and eligibility", { exact: true })
+      .click();
+  await legalName.fill("Creekside Community Association");
+  await wizard
+    .getByRole("checkbox", { name: /I’ve checked the answers/ })
+    .check();
+  await wizard.getByRole("button", { name: "Save reviewed answers" }).click();
+  await expect(wizard).toHaveCount(0);
+  expect(state.ai).toHaveLength(0);
+  expect(state.uploads).toHaveLength(0);
+  expect(state.organisations[0].profile.grant_setup).toMatchObject({
+    answers: {
+      website: { status: "confirmed", value: "https://example.org.au" },
+      legal_name: {
+        status: "confirmed",
+        value: "Creekside Community Association",
+      },
+    },
+  });
+});
+
+test("grant setup keeps private financial reports out of AI and asks before analysing an insurance upload", async ({
+  page,
+}) => {
+  const privateReport = {
+    ...initialDocuments[0],
+    name: "full-financial-report.pdf",
+    category: "financial_statement",
+  };
+  const state = await prepareDocuments(page, [privateReport]);
+  await page.route("**/api/ai", (route) => {
+    state.ai.push(route.request().postDataJSON());
+    return route.fulfill({ json: { setupSuggestions: [] } });
+  });
+  await page.goto("/?view=organisation");
+  await page.getByRole("button", { name: "Set up for grants" }).click();
+  const wizard = page.getByRole("dialog");
+  await expect(
+    wizard.getByRole("checkbox", { name: privateReport.name, exact: true }),
+  ).toHaveCount(0);
+  const uploads = [
+    {
+      label: "Upload insurance certificates",
+      name: "cover.pdf",
+      category: "insurance",
+      selected: false,
+    },
+    {
+      label: "Upload financial reports",
+      name: "annual-summary.pdf",
+      category: "financial_summary",
+      selected: true,
+    },
+  ];
+  for (const upload of uploads) {
+    const [chooser] = await Promise.all([
+      page.waitForEvent("filechooser"),
+      wizard.getByRole("button", { name: upload.label, exact: true }).click(),
+    ]);
+    await chooser.setFiles({
+      name: upload.name,
+      mimeType: "application/pdf",
+      buffer: Buffer.from("Fictional document bytes"),
+    });
+    const choice = wizard.getByRole("checkbox", {
+      name: upload.name,
+      exact: true,
+    });
+    await expect(choice).toBeVisible();
+    if (upload.selected) await expect(choice).toBeChecked();
+    else await expect(choice).not.toBeChecked();
+    expect(
+      state.documents.find(({ name }) => name === upload.name)?.category,
+    ).toBe(upload.category);
+  }
+  const suggest = wizard.getByRole("button", {
+    name: "Suggest answers",
+    exact: true,
+  });
+  await suggest.click();
+  await expect(wizard).toHaveAccessibleName("Review grant setup answers");
+  expect(state.ai).toHaveLength(1);
+  expect(state.ai[0]).toMatchObject({
+    action: "setup-source",
+    documentIds: [
+      state.documents.find(({ name }) => name === uploads[1].name)?.id,
+    ],
+  });
+  expect(state.ai[0].includeInsurance).toBeUndefined();
+
+  await wizard.getByRole("button", { name: "Back to sources" }).click();
+  await wizard
+    .getByRole("checkbox", { name: uploads[0].name, exact: true })
+    .check();
+  await suggest.click();
+  await expect(wizard).toHaveAccessibleName("Review grant setup answers");
+  expect(state.ai).toHaveLength(2);
+  expect(state.ai[1]).toMatchObject({
+    action: "setup-source",
+    documentIds: [
+      state.documents.find(({ name }) => name === uploads[0].name)?.id,
+    ],
+    includeInsurance: true,
+  });
+});
+
 test("grant setup retries only failed sources, keeps conflicting evidence and waits for an explicit choice", async ({
   page,
 }) => {
@@ -300,7 +447,7 @@ test("grant setup retries only failed sources, keeps conflicting evidence and wa
   await page.getByRole("button", { name: "Set up for grants" }).click();
   await page.getByRole("checkbox", { name: first.sourceLabel }).check();
   await page.getByRole("checkbox", { name: second.sourceLabel }).check();
-  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await page.getByRole("button", { name: "Suggest answers" }).click();
   await expect(
     page.getByRole("dialog", { name: "Review grant setup answers" }),
   ).toBeVisible();
@@ -308,15 +455,23 @@ test("grant setup retries only failed sources, keeps conflicting evidence and wa
     page.getByText("Some sources still need attention"),
   ).toBeVisible();
   await page.getByRole("button", { name: "Back to sources" }).click();
-  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await page.getByRole("button", { name: "Suggest answers" }).click();
 
   const review = page.getByRole("dialog", {
     name: "Review grant setup answers",
   });
+  for (const result of [first, second]) {
+    await expect(review.getByText(result.quote)).toBeHidden();
+    await review
+      .locator(".grant-setup-alternative")
+      .filter({ hasText: result.value })
+      .getByText("View source", { exact: true })
+      .click();
+  }
   await expect(review.getByText(first.quote)).toBeVisible();
   await expect(review.getByText(second.quote)).toBeVisible();
   await expect(
-    review.getByText("Documents that could fill gaps"),
+    review.getByRole("button", { name: "Show all questions" }),
   ).toBeVisible();
   await expect(
     review.getByRole("textbox", {
@@ -346,7 +501,7 @@ test("grant setup retries only failed sources, keeps conflicting evidence and wa
   ).not.toHaveProperty("legal_name");
 
   await page.getByRole("button", { name: "Set up for grants" }).click();
-  await page.getByRole("button", { name: "Review or answer manually" }).click();
+  await page.getByRole("button", { name: "Enter answers manually" }).click();
   await review
     .locator(".grant-setup-alternative")
     .filter({ hasText: first.value })
@@ -456,7 +611,7 @@ test("grant setup splits an over-limit excerpt check and retries only the failed
   await setup.click();
   for (const { name } of initialDocuments)
     await page.getByRole("checkbox", { name, exact: true }).check();
-  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await page.getByRole("button", { name: "Suggest answers" }).click();
   await expect(retry).toBeEnabled();
   await expect(review.getByText("Draft saved for later.")).toBeVisible();
   await expect(
@@ -532,9 +687,7 @@ for (const viewportWidth of [1280, 390]) {
     });
     await page.goto("/?view=organisation");
     await page.getByRole("button", { name: "Set up for grants" }).click();
-    await page
-      .getByRole("button", { name: "Review or answer manually" })
-      .click();
+    await page.getByRole("button", { name: "Enter answers manually" }).click();
     const review = page.getByRole("dialog", {
       name: "Review grant setup answers",
     });
@@ -546,6 +699,7 @@ for (const viewportWidth of [1280, 390]) {
     const question = "What does the organisation do?";
     const editor = review.getByRole("textbox", { name: question, exact: true });
     await expect(editor).toHaveValue(description);
+    await review.getByText("View source", { exact: true }).click();
     const dimensions = await editor.evaluate((element) => {
       const fieldset = element.closest("fieldset")!;
       const quote = fieldset.querySelector("blockquote")!;
@@ -622,16 +776,17 @@ test("grant setup resumes a private draft across reloads and clears it only afte
   });
   const save = review.getByRole("button", { name: "Save reviewed answers" });
   async function openLegalIdentity() {
-    await review
-      .locator("summary")
-      .filter({ hasText: "Legal identity and eligibility" })
-      .click();
+    if (!(await legalName.isVisible()))
+      await review
+        .locator("summary")
+        .filter({ hasText: "Legal identity and eligibility" })
+        .click();
   }
 
   await page.goto("/?view=organisation");
   await setup.click();
   await page.getByRole("checkbox", { name: source.name, exact: true }).check();
-  await page.getByRole("button", { name: "Analyse pending sources" }).click();
+  await page.getByRole("button", { name: "Suggest answers" }).click();
   await expect(review).toBeVisible();
   await expect(
     review.getByText("Draft saved for later.", { exact: true }),
@@ -1830,7 +1985,7 @@ for (const flow of [
     discard: "Discard grant setup draft?",
     sources: "Set up your organisation for grants",
     pastedText: "Paste a public or redacted excerpt",
-    analyse: "Analyse pending sources",
+    analyse: "Suggest answers",
     draftField: "What is your registered legal name?",
   },
   {
@@ -1973,6 +2128,10 @@ for (const flow of [
     await discard.click();
     await confirmDiscard.click();
     await expect(sourceStep).toBeVisible();
+    if (flow.kind === "grant-setup")
+      await sourceStep
+        .getByText("Paste public or redacted text", { exact: true })
+        .click();
     await expect(
       sourceStep.getByRole("textbox", { name: flow.pastedText }),
     ).toHaveValue("");
@@ -2015,3 +2174,100 @@ for (const flow of [
     expect(state.updates).toHaveLength(0);
   });
 }
+
+test("report uploads validate the entire group and send only explicitly selected library documents", async ({
+  page,
+}) => {
+  const state = await prepareDocuments(page, initialDocuments, {
+    approved: true,
+  });
+  await page.route("**/api/ai", (route) => {
+    state.ai.push(route.request().postDataJSON());
+    return route.fulfill({
+      json: {
+        importCandidates: [
+          {
+            title: "West Coast Fund",
+            funder: "West Coast Trust",
+            summary: "",
+            guidelines_text: "",
+            source_url: "",
+            amount_min: null,
+            amount_max: null,
+            location: "WA",
+            focus_areas: [],
+            requirements: [],
+            opens_on: null,
+            closes_at: "2027-03-31T23:30:00+08:00",
+            closing_date: "2027-03-31",
+          },
+        ],
+        sourceFingerprint: fingerprint,
+        stageIssuedAt: Date.now(),
+      },
+    });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await page.getByRole("button", { name: "Import grants" }).click();
+  const dialog = page.getByRole("dialog");
+  const upload = dialog.getByLabel("Upload report files");
+  const file = (name: string, size = 128) => ({
+    name,
+    mimeType: "application/octet-stream",
+    buffer: Buffer.alloc(size, 65),
+  });
+  const reports = [
+    "report.pdf",
+    "research.docx",
+    "prospects.xlsx",
+    "rounds.csv",
+    "notes.txt",
+  ];
+  await upload.setInputFiles([file("valid.txt"), file("unsupported.exe")]);
+  await expect(dialog.getByRole("alert")).toContainText("unsupported.exe");
+  await upload.setInputFiles(
+    Array.from({ length: 9 }, (_, i) => file(`grant-${i}.txt`)),
+  );
+  await expect(dialog.getByRole("alert")).toContainText("up to 8");
+  await upload.setInputFiles([file("large.pdf", 10 * 1024 * 1024 + 1)]);
+  await expect(dialog.getByRole("alert")).toContainText("10 MB");
+  await upload.setInputFiles([
+    file("a.pdf", 8 * 1024 * 1024),
+    file("b.pdf", 8 * 1024 * 1024),
+  ]);
+  await expect(dialog.getByRole("alert")).toContainText("15 MB");
+  expect(state.uploads).toEqual([]);
+  await upload.setInputFiles(reports.map((name) => file(name)));
+  for (const name of reports)
+    await expect(dialog.getByRole("checkbox", { name })).toBeChecked();
+  await expect(
+    dialog.getByRole("checkbox", { name: "registration.docx" }),
+  ).not.toBeChecked();
+  await expect(
+    dialog.getByRole("checkbox", { name: "history.xlsx" }),
+  ).not.toBeChecked();
+  expect(state.inserts.map((doc) => doc.category)).toEqual(
+    reports.map(() => "grant_research"),
+  );
+  expect(state.ai).toEqual([]);
+  await dialog.getByRole("checkbox", { name: "prospects.xlsx" }).uncheck();
+  await dialog.getByRole("checkbox", { name: "history.xlsx" }).check();
+  await dialog.getByRole("button", { name: "Read with AI" }).click();
+  await expect(
+    dialog.getByRole("checkbox", { name: "West Coast Fund" }),
+  ).toBeChecked();
+  await expect(
+    dialog.getByText("Closes 31 Mar 2027", { exact: true }),
+  ).toBeVisible();
+  expect(state.ai).toHaveLength(1);
+  expect(state.ai[0]).toMatchObject({
+    text: "",
+    importStage: "preview",
+    documentIds: [
+      ...state.inserts
+        .filter((doc) => doc.name !== "prospects.xlsx")
+        .map((doc) => doc.id),
+      initialDocuments[1].id,
+    ],
+  });
+});

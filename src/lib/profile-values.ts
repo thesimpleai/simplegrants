@@ -1,5 +1,31 @@
 import type { Profile } from "../types";
 
+/** Public identifier formatting is optional. Other registry codes keep their
+ * meaningful prefixes and punctuation. */
+export function australianIdentifierDigits(
+  field: string,
+  value: string,
+): string | undefined {
+  const text = value.normalize("NFKC").trim();
+  const digits =
+    field === "abn"
+      ? text.replace(
+          /^(?:A\.?B\.?N\.?|Australian Business Number)\s*:?\s*/i,
+          "",
+        )
+      : field === "registration_number"
+        ? text.replace(
+            /^(?:A\.?C\.?N\.?|Australian Company Number)\s*:?\s*/i,
+            "",
+          )
+        : "";
+  const compact = digits.replace(/[\s-]/gu, "");
+  const length = field === "abn" ? 11 : 9;
+  return compact.length === length && /^\d+$/.test(compact)
+    ? compact
+    : undefined;
+}
+
 export const ORGANISATION_TYPES = [
   "Charity",
   "Not-for-profit",
@@ -30,18 +56,23 @@ export function organisationType(value: string | undefined): string {
   };
   return aliases[key(value)] ?? "Other";
 }
+const states: Record<string, string> = {
+  victoria: "VIC",
+  newsouthwales: "NSW",
+  queensland: "QLD",
+  southaustralia: "SA",
+  westernaustralia: "WA",
+  tasmania: "TAS",
+  northernterritory: "NT",
+  australiancapitalterritory: "ACT",
+  australiawide: "Australia-wide",
+};
+
+export function profileState(value: string): string {
+  return states[key(value)] ?? value.trim().toUpperCase();
+}
+
 export function profileValues(profile: Profile): Profile {
-  const states: Record<string, string> = {
-    victoria: "VIC",
-    newsouthwales: "NSW",
-    queensland: "QLD",
-    southaustralia: "SA",
-    westernaustralia: "WA",
-    tasmania: "TAS",
-    northernterritory: "NT",
-    australiancapitalterritory: "ACT",
-    australiawide: "Australia-wide",
-  };
   return {
     ...profile,
     ...(profile.type !== undefined
@@ -49,8 +80,7 @@ export function profileValues(profile: Profile): Profile {
       : {}),
     ...(profile.state
       ? {
-          state:
-            states[key(profile.state)] ?? profile.state.trim().toUpperCase(),
+          state: profileState(profile.state),
         }
       : {}),
   };

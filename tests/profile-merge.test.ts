@@ -3,6 +3,27 @@ import { mergeReviewedProfile } from "../src/lib/profile-merge";
 import type { Profile } from "../src/types";
 
 describe("reviewed profile updates", () => {
+  it("keeps approved public identifiers and flags only material changes", () => {
+    const saved: Profile = {
+      name: "Example organisation",
+      abn: "12 345 678 901",
+      registration_number: "601 234 567",
+    };
+    expect(
+      mergeReviewedProfile(saved, {
+        name: saved.name,
+        abn: "12345678901",
+        registration_number: "ACN 601234567",
+      }),
+    ).toEqual({ profile: saved, checks: [] });
+    expect(
+      mergeReviewedProfile(saved, {
+        name: saved.name,
+        registration_number: "601234568",
+      }).checks,
+    ).toMatchObject([{ field: "registration_number" }]);
+  });
+
   it("adds distinct milestones and facts while retaining conflicting reviewed record values", () => {
     const saved: Profile = {
       name: "Reviewed organisation",

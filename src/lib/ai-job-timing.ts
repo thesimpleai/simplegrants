@@ -1,3 +1,5 @@
+export const AI_RECEIPT_MAX_AGE_MS = 15 * 60 * 1000;
+
 const standardTiming = {
   workerMs: 120_000,
   modelMs: 90_000,

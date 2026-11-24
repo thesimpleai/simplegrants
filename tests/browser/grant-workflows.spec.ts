@@ -151,6 +151,7 @@ export const supabase={auth:{getSession:async()=>({data:{session:signedIn?{user,
 async function openApplication(page: Page) {
   await page.goto(`/?view=applications&org=${orgId}`);
   await page.locator(".application-row").click();
+  await page.getByRole("button", { name: "Project", exact: true }).click();
 }
 
 test("source badges distinguish uploaded details, added links and grounded citations", async ({
@@ -182,11 +183,6 @@ test("source badges distinguish uploaded details, added links and grounded citat
   ).toContainText("Web source found · check eligibility");
   await expect(page.locator("body")).not.toContainText(
     "Source found · review fit",
-  );
-  await page.getByRole("button", { name: "Add a grant", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("Grant guidelines");
-  await expect(page.getByRole("dialog")).not.toContainText(
-    "upload it as Program guidelines",
   );
 });
 
@@ -241,6 +237,9 @@ test("explicit insurance ineligibility blocks the AI button even with an empty i
   await expect(page.getByRole("dialog")).toContainText(
     "Upload a current insurance document",
   );
+  await page
+    .getByText("Funder guidelines and questions", { exact: true })
+    .click();
   await page
     .getByRole("textbox", { name: "Current program guidelines", exact: true })
     .fill("Insurance is optional and is not required for this opportunity.");
@@ -369,6 +368,7 @@ for (const referenceMode of ["reference", "no-reference"] as const) {
       application: { ...application, draft: {} },
     });
     await openApplication(page);
+    await page.getByRole("button", { name: "Submission", exact: true }).click();
     await page
       .getByRole("combobox", { name: "Application status", exact: true })
       .selectOption("submitted");
@@ -418,15 +418,40 @@ for (const referenceMode of ["reference", "no-reference"] as const) {
   });
 }
 
-test("discovery uses two immutable requests and loads records only after extraction completes", async ({
+test("discovery checks the shortlist before extracting and refreshing saved results", async ({
   page,
 }) => {
+  await page.clock.setFixedTime(new Date("2026-11-23T01:30:00Z"));
   const state = await mockGrantWorkspace(page);
+  const title = "New opportunity from the verified shortlist";
   const searchDraft = {
-    summary: "Current funder listings with cited sources.",
-    sources,
+    phase: "search",
+    summary: "Leads from the local, sector and foundation searches.",
+    sources: [
+      {
+        title: "Preliminary funding listing",
+        uri: "https://directory.example.invalid/community",
+      },
+    ],
+    completed_lanes: 3,
+    failed_lanes: 0,
   };
   const issuedAt = Date.now();
+  const verifiedDraft = {
+    ...searchDraft,
+    phase: "verified",
+    summary: "The current round is listed in the funder's own guidelines.",
+    sources,
+  };
+  const verifiedReceipt = {
+    searchDraft: verifiedDraft,
+    sourceFingerprint: "d".repeat(64),
+    stageIssuedAt: issuedAt + 1,
+  };
+  let releaseVerification!: () => void;
+  const verificationHeld = new Promise<void>((resolve) => {
+    releaseVerification = resolve;
+  });
   let releaseFinal!: () => void;
   const finalHeld = new Promise<void>((resolve) => {
     releaseFinal = resolve;
@@ -445,9 +470,28 @@ test("discovery uses two immutable requests and loads records only after extract
           stageIssuedAt: issuedAt,
         },
       });
+    if (body.discoveryStage === "verify") {
+      await verificationHeld;
+      return route.fulfill({ json: verifiedReceipt });
+    }
+    expect(body.discoveryStage).toBe("extract");
     await finalHeld;
+    state.grants.push({
+      ...opportunity,
+      id: "95a2a900-d546-4c83-8f56-4e78b3b0367b",
+      title,
+      source_url: sources[0].uri,
+      closes_at: null,
+      provenance: {
+        method: "google_search_grounding",
+        sources,
+        round_status: "upcoming",
+        closing_date: "2027-03-31",
+        deadline_note: "The funder lists the date without a closing time.",
+      },
+    });
     return route.fulfill({
-      json: { opportunities: [], sources, message: "No current grants found." },
+      json: { opportunities: state.grants.slice(1), sources },
     });
   });
   await page.goto(`/?view=opportunities&org=${orgId}`);
@@ -457,9 +501,24 @@ test("discovery uses two immutable requests and loads records only after extract
     .getByRole("button", { name: "Find grants with AI", exact: true })
     .click();
   await expect.poll(() => state.ai.length).toBe(2);
+  expect(state.ai[1]).toMatchObject({
+    discoveryStage: "verify",
+    searchDraft,
+    sourceFingerprint: fingerprint,
+    stageIssuedAt: issuedAt,
+  });
   expect(state.reads).toBe(baselineReads);
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  await expect(page.getByRole("status")).toContainText(
+    "Checking funder listings",
+  );
+  releaseVerification();
+  await expect.poll(() => state.ai.length).toBe(3);
+  expect(state.reads).toBe(baselineReads);
+  await expect(page.getByRole("status")).toContainText("Saving opportunities");
   expect(state.ai.map((body) => body.discoveryStage)).toEqual([
     "search",
+    "verify",
     "extract",
   ]);
   for (const body of state.ai)
@@ -469,16 +528,159 @@ test("discovery uses two immutable requests and loads records only after extract
       text: "",
       documentIds: [],
     });
-  expect(state.ai[1]).toMatchObject({
-    searchDraft,
-    sourceFingerprint: fingerprint,
-    stageIssuedAt: issuedAt,
-  });
+  expect(state.ai[2]).toMatchObject(verifiedReceipt);
   releaseFinal();
   await expect.poll(() => state.reads).toBe(baselineReads + 6);
+  const card = page.getByRole("article").filter({ hasText: title });
+  await expect(card).toContainText("Upcoming");
+  await expect(card).toContainText("Opens 1 Jan 2027");
   await expect(
     page.getByRole("button", { name: "Find grants with AI", exact: true }),
   ).toBeEnabled();
+  await card.getByRole("button", { name: title, exact: true }).click();
+  const details = page.getByRole("dialog");
+  await expect(details).toContainText("31 Mar 2027 (time to confirm)");
+  await expect(details).toContainText(
+    "The funder lists the date without a closing time.",
+  );
+});
+
+test("discovery reports an empty checked shortlist without presenting the preliminary result", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page);
+  const noResults = "No live rounds could be confirmed from funder listings.";
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.discoveryStage === "extract")
+      return route.fulfill({
+        json: { opportunities: [], sources: [], message: noResults },
+      });
+    const verified = body.discoveryStage === "verify";
+    return route.fulfill({
+      json: {
+        searchDraft: {
+          phase: verified ? "verified" : "search",
+          summary: verified ? "NO_SOURCE_BACKED_ROUNDS" : "A preliminary lead",
+          sources: verified ? [] : sources,
+          completed_lanes: 3,
+          failed_lanes: 0,
+        },
+        sourceFingerprint: fingerprint,
+        stageIssuedAt: Date.now(),
+      },
+    });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  await page
+    .getByRole("button", { name: "Find grants with AI", exact: true })
+    .click();
+  await expect(page.getByText(noResults)).toBeVisible();
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  expect(state.ai.at(-1)?.searchDraft).toMatchObject({
+    phase: "verified",
+    sources: [],
+  });
+});
+
+test("retrying a discovery extraction failure reuses the verified shortlist", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page);
+  const issuedAt = Date.now();
+  const verified = {
+    searchDraft: {
+      phase: "verified",
+      summary: "The funder's own page confirms the round is open.",
+      sources,
+      completed_lanes: 3,
+      failed_lanes: 0,
+    },
+    sourceFingerprint: "d".repeat(64),
+    stageIssuedAt: issuedAt + 1,
+  };
+  const completionNotice = "The checked opportunities are ready for review.";
+  const title = "Opportunity saved on retry";
+  let extractionAttempts = 0;
+  await page.route("**/api/ai", (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.discoveryStage === "search")
+      return route.fulfill({
+        json: {
+          searchDraft: {
+            ...verified.searchDraft,
+            phase: "search",
+            summary: "A preliminary list of leads.",
+          },
+          sourceFingerprint: fingerprint,
+          stageIssuedAt: issuedAt,
+        },
+      });
+    if (body.discoveryStage === "verify")
+      return route.fulfill({ json: verified });
+    expect(body.discoveryStage).toBe("extract");
+    if (++extractionAttempts === 1)
+      return route.fulfill({
+        status: 502,
+        json: {
+          error: "The model stopped at the response length limit.",
+          code: "SG_AI_OUTPUT_LIMIT",
+          reference: opportunityId,
+        },
+      });
+    const next = {
+      ...opportunity,
+      id: "af83c85f-43b1-490f-b22d-223b38e05bec",
+      title,
+    };
+    state.grants.push(next);
+    return route.fulfill({
+      json: { opportunities: [next], sources, message: completionNotice },
+    });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  const find = page.getByRole("button", {
+    name: "Find grants with AI",
+    exact: true,
+  });
+  await find.click();
+  await expect(page.getByRole("alert")).toContainText("SG_AI_OUTPUT_LIMIT");
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  await find.click();
+  await expect(page.getByText(completionNotice)).toBeVisible();
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+  expect(state.ai.map(({ discoveryStage }) => discoveryStage)).toEqual([
+    "search",
+    "verify",
+    "extract",
+    "extract",
+  ]);
+  expect(state.ai[2]).toMatchObject(verified);
+  expect(state.ai[3]).toEqual(state.ai[2]);
+});
+
+test("a known Western Australian deadline stays open across Melbourne midnight", async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date("2026-11-23T13:05:00Z"));
+  await mockGrantWorkspace(page, {
+    grants: [
+      {
+        ...opportunity,
+        location: "Western Australia",
+        opens_on: null,
+        closes_at: "2026-11-23T23:00:00+08:00",
+        provenance: { round_status: "open", closing_date: "2026-11-23" },
+      },
+    ],
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  const card = page.getByRole("article").filter({ hasText: opportunity.title });
+  await expect(card.getByText("Open", { exact: true })).toBeVisible();
 });
 
 test("selected budget evidence is saved and sent unchanged through both draft stages", async ({
@@ -515,10 +717,15 @@ test("selected budget evidence is saved and sent unchanged through both draft st
     state.application.draft = {
       application_text:
         "Budget B2 is an unverified saved value; unavailable formula cells need review.",
+      evidence_sources: [{ id, name: "Budget.xlsx" }],
     };
     return route.fulfill({ json: { draft: state.application.draft } });
   });
   await openApplication(page);
+  await expect(
+    page.getByText("No files selected for this draft", { exact: true }),
+  ).toBeInViewport();
+  await page.getByText("Review uploads", { exact: true }).click();
   const check = page.getByRole("checkbox", {
     name: "Use Budget.xlsx for this draft",
     exact: true,
@@ -533,8 +740,12 @@ test("selected budget evidence is saved and sent unchanged through both draft st
   ).toHaveValue(/Budget B2/);
   expect(state.ai).toHaveLength(2);
   expect(state.ai.map((body) => body.documentIds)).toEqual([[id], [id]]);
+  await expect(
+    page.getByRole("listitem").filter({ hasText: "Budget.xlsx" }),
+  ).toBeVisible();
   expect(state.application.project_details.source_document_ids).toEqual([id]);
   await openApplication(page);
+  await page.getByText("Supporting documents", { exact: true }).click();
   await expect(
     page.getByRole("checkbox", {
       name: "Use Budget.xlsx for this draft",
@@ -590,11 +801,15 @@ test("failed draft generation preserves the manual draft and inputs, then retry 
     .click();
   await expect.poll(() => state.ai.length).toBe(2);
   expect(state.reads).toBe(baselineReads);
+  await page
+    .getByRole("button", { name: "Draft & review", exact: true })
+    .click();
   await expect(
     page.getByRole("textbox", { name: "Your application draft", exact: true }),
   ).toHaveValue(/Original manual draft/);
   releaseGenerate();
   await expect(page.getByRole("alert")).toContainText("SG_AI_UNAVAILABLE");
+  await page.getByRole("button", { name: "Project", exact: true }).click();
   await expect(
     page.getByRole("textbox", {
       name: "Tell us about your project",
@@ -736,29 +951,43 @@ for (const key of ["grant", "opportunity"])
     await expect(page.getByRole("dialog")).toContainText(opportunity.title);
   });
 
-test("an invalid discovery receipt is rejected without extracting or refreshing partial results", async ({
-  page,
-}) => {
-  const state = await mockGrantWorkspace(page);
-  await page.route("**/api/ai", (route) => {
-    state.ai.push(route.request().postDataJSON());
-    return route.fulfill({
-      json: {
-        searchDraft: { summary: "A search result", sources },
-        sourceFingerprint: fingerprint,
-      },
+for (const invalidStage of ["search", "verify"]) {
+  test(`discovery rejects an invalid ${invalidStage} receipt without extracting or refreshing`, async ({
+    page,
+  }) => {
+    const state = await mockGrantWorkspace(page);
+    await page.route("**/api/ai", (route) => {
+      const body = route.request().postDataJSON();
+      state.ai.push(body);
+      return route.fulfill({
+        json: {
+          searchDraft: {
+            phase: body.discoveryStage === "search" ? "search" : "verified",
+            summary: "A grounded listing.",
+            sources,
+            completed_lanes: 3,
+            failed_lanes: 0,
+          },
+          sourceFingerprint: fingerprint,
+          ...(body.discoveryStage !== invalidStage
+            ? { stageIssuedAt: Date.now() }
+            : {}),
+        },
+      });
     });
+    await page.goto(`/?view=opportunities&org=${orgId}`);
+    await expect(page.locator(".grant-card")).toHaveCount(1);
+    const baselineReads = state.reads;
+    await page
+      .getByRole("button", { name: "Find grants with AI", exact: true })
+      .click();
+    await expect(page.getByRole("alert")).toContainText("SG_AI_RESPONSE");
+    expect(state.ai.map(({ discoveryStage }) => discoveryStage)).toEqual(
+      invalidStage === "search" ? ["search"] : ["search", "verify"],
+    );
+    expect(state.reads).toBe(baselineReads);
   });
-  await page.goto(`/?view=opportunities&org=${orgId}`);
-  await expect(page.locator(".grant-card")).toHaveCount(1);
-  const baselineReads = state.reads;
-  await page
-    .getByRole("button", { name: "Find grants with AI", exact: true })
-    .click();
-  await expect(page.getByRole("alert")).toContainText("SG_AI_RESPONSE");
-  expect(state.ai).toHaveLength(1);
-  expect(state.reads).toBe(baselineReads);
-});
+}
 
 test("a changed signed-in user stops discovery before the next stage", async ({
   page,
@@ -773,7 +1002,13 @@ test("a changed signed-in user stops discovery before the next stage", async ({
     await hold;
     return route.fulfill({
       json: {
-        searchDraft: { summary: "A search result", sources },
+        searchDraft: {
+          phase: "search",
+          summary: "A grounded listing.",
+          sources,
+          completed_lanes: 3,
+          failed_lanes: 0,
+        },
         sourceFingerprint: fingerprint,
         stageIssuedAt: Date.now(),
       },
@@ -898,4 +1133,543 @@ test("opening opportunities repairs an older source link without an AI request",
   );
   expect(repairs).toBe(1);
   expect(state.ai).toHaveLength(0);
+});
+
+test("mobile application review shows actionable gaps, keeps structured drafts and checks edited text with missing evidence", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await mockGrantWorkspace(page, {
+    application: { ...application, draft: {} },
+  });
+  const readiness = {
+    score: 62,
+    scoreLimit: 69,
+    checks: [
+      {
+        key: "answers",
+        label: "Question coverage",
+        points: 15,
+        maxPoints: 30,
+        note: "The venue is missing.",
+      },
+      {
+        key: "evidence",
+        label: "Supporting evidence",
+        points: 12,
+        maxPoints: 25,
+        note: "The brief supports the activity.",
+      },
+      {
+        key: "criteria",
+        label: "Funder criteria",
+        points: 10,
+        maxPoints: 20,
+        note: "Local benefit needs detail.",
+      },
+      {
+        key: "delivery",
+        label: "Delivery and outcomes",
+        points: 15,
+        maxPoints: 15,
+        note: "A delivery plan is available.",
+      },
+      {
+        key: "budget",
+        label: "Budget and resources",
+        points: 10,
+        maxPoints: 10,
+        note: "The budget reconciles.",
+      },
+    ],
+    suggestions: [
+      {
+        action: "Describe expected attendance.",
+        why: "It helps establish the benefit.",
+        priority: "recommended",
+      },
+      {
+        action: "Name the project venue.",
+        why: "The funder requires a local venue.",
+        priority: "required",
+      },
+    ],
+  };
+  const generated = {
+    sections: [
+      {
+        question: "Where will the lunch run?",
+        answer: "The group will run a community lunch.",
+        evidence: ["Approved lunch plan"],
+        word_limit: 80,
+      },
+      ...["Who will attend?", "What will it cost?", "Who will deliver it?"].map(
+        (question) => ({ question, answer: "", evidence: [], word_limit: 50 }),
+      ),
+    ],
+    readiness,
+    missing_information: ["Which venue will host the lunch?"],
+  };
+  const edited =
+    "  We will hold the lunch in the community hall.\nThe venue is booked.  ";
+  await page.route("**/api/ai", async (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    expect(body.allowIncompleteDraft).toBe(true);
+    if (body.draftStage === "preflight")
+      return route.fulfill({
+        json: {
+          draftRequirements: { documents: [], information: [] },
+          sourceFingerprint: fingerprint,
+          stageIssuedAt: Date.now(),
+        },
+      });
+    if (body.reviewExistingDraft) {
+      expect(state.application.draft.application_text).toBe(edited);
+      state.application.draft = {
+        ...generated,
+        sections: [
+          {
+            ...generated.sections[0],
+            answer: edited.trim(),
+            suggestion: {
+              answer: "The lunch will be held at the booked community hall.",
+              evidence: ["Hall booking record"],
+            },
+          },
+          ...generated.sections.slice(1),
+        ],
+        application_text: edited,
+        readiness: { ...readiness, score: 69 },
+      };
+    } else state.application.draft = structuredClone(generated);
+    return route.fulfill({ json: { draft: state.application.draft } });
+  });
+  await openApplication(page);
+  await expect(
+    page.getByRole("textbox", { name: "Your application draft" }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Prepare draft with AI", exact: true })
+    .click();
+  const assessment = page.getByRole("region", {
+    name: "Draft readiness",
+    exact: true,
+  });
+  await expect(assessment.getByLabel("62 out of 100")).toBeVisible();
+  const first = page.getByRole("article", {
+    name: "Where will the lunch run?",
+  });
+  await expect(
+    first.getByText("The group will run a community lunch."),
+  ).toBeInViewport();
+  await expect(first.getByText("Approved lunch plan")).toBeVisible();
+  await expect(assessment.getByText("Name the project venue.")).toBeHidden();
+  await assessment
+    .getByText("Readiness and suggestions", { exact: false })
+    .first()
+    .click();
+  await expect(assessment.getByText("Name the project venue.")).toBeVisible();
+  await expect(
+    assessment.getByText("Describe expected attendance."),
+  ).toBeVisible();
+  await assessment.getByText("How the score is calculated").click();
+  await expect(assessment).toContainText("capped at 69");
+  await page.getByLabel("Choose a question").selectOption("3");
+  const last = page.getByRole("article", { name: "Who will deliver it?" });
+  await expect(last.getByText("Needs an answer")).toBeVisible();
+  await expect(
+    last.getByRole("button", { name: "Next question", exact: true }),
+  ).toBeDisabled();
+  await last.getByRole("button", { name: "Previous question" }).click();
+  await expect(
+    page.getByRole("article", { name: "What will it cost?" }),
+  ).toBeVisible();
+  await page.getByLabel("Choose a question").selectOption("0");
+  await expect(first.getByText("Approved lunch plan")).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Tell us about your project" }),
+  ).toHaveCount(0);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Download draft", exact: true }).click(),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream!) chunks.push(Buffer.from(chunk));
+  const exported = Buffer.concat(chunks).toString();
+  expect(exported).toContain("Approved lunch plan");
+  expect(exported).toContain(
+    "Required before submission: Name the project venue.",
+  );
+  expect(exported).not.toContain("maxPoints");
+  const save = page.getByRole("button", { name: "Save changes", exact: true });
+  await save.click();
+  await expect(save).toBeEnabled();
+  expect(state.application.draft).toEqual(generated);
+  await assessment
+    .getByRole("button", { name: "Update project inputs" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Name the project venue." }),
+  ).toBeVisible();
+  await page
+    .getByText("Funder guidelines and questions", { exact: true })
+    .click();
+  await page
+    .getByLabel("Current program guidelines")
+    .fill("Applicants must provide current public liability insurance.");
+  await expect(
+    page.getByRole("button", { name: "Refresh draft and score" }),
+  ).toBeDisabled();
+  await save.click();
+  await expect.poll(() => state.application.draft.readiness_stale).toBe(true);
+  expect(state.application.draft.sections).toEqual(generated.sections);
+  expect(state.application.draft).not.toHaveProperty("application_text");
+  await page
+    .getByRole("button", { name: "Draft & review", exact: true })
+    .click();
+  await expect(assessment.getByLabel("62 out of 100")).toHaveCount(0);
+  await page.getByText("Edit draft text", { exact: true }).click();
+  await page.getByLabel("Your application draft").fill(edited);
+  await page
+    .getByRole("button", { name: "Check edited draft", exact: true })
+    .click();
+  await expect(assessment.getByLabel("69 out of 100")).toBeVisible();
+  const suggestion = first.getByRole("region", { name: "Suggested revision" });
+  await expect(first.getByText(edited.trim())).toBeVisible();
+  await expect(
+    suggestion.getByText(
+      "The lunch will be held at the booked community hall.",
+    ),
+  ).toBeVisible();
+  await expect(suggestion.getByText("Hall booking record")).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await suggestion
+    .getByRole("button", { name: "Copy suggested wording" })
+    .click();
+  await expect(suggestion.getByRole("status")).toHaveText("Revision copied.");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    "The lunch will be held at the booked community hall.",
+  );
+  const [afterReview] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Download draft" }).click(),
+  ]);
+  const reviewedCopy: Buffer[] = [];
+  for await (const chunk of (await afterReview.createReadStream())!)
+    reviewedCopy.push(Buffer.from(chunk));
+  expect(Buffer.concat(reviewedCopy).toString()).toContain(edited);
+  expect(Buffer.concat(reviewedCopy).toString()).not.toContain(
+    "The lunch will be held at the booked community hall.",
+  );
+  expect(state.ai.filter((body) => body.reviewExistingDraft)).toHaveLength(2);
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.locator(".application-row").click();
+  await expect(assessment.getByLabel("69 out of 100")).toBeVisible();
+  await page.getByText("Edit draft text", { exact: true }).click();
+  await expect(page.getByLabel("Your application draft")).toHaveValue(edited);
+  expect(
+    await page
+      .getByRole("dialog")
+      .evaluate((el) => el.scrollWidth <= el.clientWidth),
+  ).toBe(true);
+});
+
+const readingQuestion =
+  "How will the project benefit people in your community?";
+const readingParagraphs = [
+  "Local residents have asked for a regular place to meet over a meal. The neighbourhood centre will host a monthly community lunch where residents can cook together, share recipes and meet people who live nearby.",
+  "The centre will invite residents through its existing walking group and community noticeboard. Volunteers will welcome people arriving alone and offer a seat at a shared table.",
+  "After each lunch, participants can suggest an activity for the next gathering. The coordinator will use these suggestions and a short attendance record to plan the following month.",
+];
+for (const width of [1280, 390]) {
+  test(`application answers open in a readable workspace at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: width > 600 ? 880 : 844 });
+    await mockGrantWorkspace(page, {
+      application: {
+        ...application,
+        title: "Neighbourhood community lunches",
+        draft: {
+          sections: [
+            {
+              question: readingQuestion,
+              answer: readingParagraphs.join("\n\n"),
+              needs_review: true,
+              word_limit: 250,
+              evidence: [
+                "Neighbourhood centre project brief, community consultations",
+              ],
+            },
+            {
+              question: "Who will deliver the project?",
+              answer: "The centre coordinator and community volunteers.",
+              evidence: ["Project brief, delivery team"],
+            },
+            {
+              question:
+                "What will you do if only part of your request is funded?",
+              answer:
+                "We will schedule fewer lunches and keep the same number of volunteer places.",
+              character_limit: 40,
+              evidence: [],
+            },
+          ],
+          evidence_sources: [],
+        },
+      },
+    });
+    await page.goto(`/?view=applications&org=${orgId}`);
+    await page
+      .getByRole("button", { name: /Neighbourhood community lunches/ })
+      .click();
+    const article = page.getByRole("article", { name: readingQuestion });
+    const paragraphs = readingParagraphs.map((text) =>
+      article.getByText(text, { exact: true }),
+    );
+    await expect(paragraphs[0]).toBeInViewport();
+    await expect(article.getByText("Check details")).toBeVisible();
+    const layout = await paragraphs[0].evaluate((el) => {
+      const bounds = el.getBoundingClientRect();
+      const next = el.nextElementSibling!.getBoundingClientRect();
+      const css = getComputedStyle(el);
+      return {
+        font: parseFloat(css.fontSize),
+        line: parseFloat(css.lineHeight),
+        width: bounds.width,
+        paragraphGap: next.top - bounds.bottom,
+      };
+    });
+    expect(layout.font).toBeGreaterThanOrEqual(16);
+    expect(layout.line / layout.font).toBeGreaterThanOrEqual(1.5);
+    expect(layout.width).toBeLessThan(760);
+    expect(layout.paragraphGap).toBeGreaterThanOrEqual(12);
+    await expect(page.getByRole("dialog")).toHaveJSProperty("scrollLeft", 0);
+    expect(
+      await page
+        .getByRole("dialog")
+        .evaluate((el) => el.scrollWidth <= el.clientWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath(`draft-reader-${width}.png`),
+    });
+    await article
+      .getByRole("button", { name: "Continue to next question" })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Who will deliver the project?" }),
+    ).toBeFocused();
+    if (width > 600)
+      await page
+        .getByRole("navigation", { name: "Application questions" })
+        .getByRole("button", { name: /What will you do if/ })
+        .click();
+    else await page.getByLabel("Choose a question").selectOption("2");
+    await expect(page.getByText("Over character limit")).toBeVisible();
+    await expect(page.getByText("No uploaded files were used.")).toBeVisible();
+    await page.getByRole("button", { name: "Review uploads" }).click();
+    await expect(
+      page.getByText("No files selected for this draft"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Save and open document library" }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Draft & review", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: "What will you do if only part of your request is funded?",
+      }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: /Neighbourhood community lunches/ }),
+    ).toBeFocused();
+  });
+}
+
+test("a research newsletter previews distinct grants and saves only the checked grant after a retry", async ({
+  page,
+}) => {
+  const unselectedDocument: DocumentRecord = {
+    id: "820ef820-975b-4651-a351-4e85d87e055f",
+    org_id: orgId,
+    name: "Different-round.pdf",
+    category: "guidelines",
+    storage_path: orgId + "/unrelated.pdf",
+    mime_type: "application/pdf",
+    size_bytes: 250,
+    verified: false,
+    created_at: "2026-10-01T00:00:00Z",
+  };
+  const state = await mockGrantWorkspace(page, {
+    grants: [],
+    documents: [unselectedDocument],
+  });
+  const text =
+    "Hi team! Creek Council’s Pocket Parks Fund closes next March. After our call, I also wrote down the Library Friends Reading Grant. Regards, Jo";
+  const candidate = {
+    title: "Pocket Parks Fund",
+    funder: "Creek Council",
+    summary: "Support for small parks.",
+    source_url: "https://example.invalid/grants/parks",
+    guidelines_text: "",
+    amount_min: null,
+    amount_max: null,
+    opens_on: null,
+    closes_at: null,
+    closing_date: "2027-03-08",
+    location: "",
+    focus_areas: [],
+    requirements: [],
+  };
+  const candidates = [
+    candidate,
+    {
+      ...candidate,
+      title: "Library Friends Reading Grant",
+      funder: "",
+      summary: "",
+      closing_date: null,
+      source_url: "",
+    },
+  ];
+  const receipt = {
+    importCandidates: candidates,
+    sourceFingerprint: fingerprint,
+    stageIssuedAt: Date.now(),
+  };
+  await page.route("**/api/ai", async (route) => {
+    const body = route.request().postDataJSON();
+    state.ai.push(body);
+    if (body.importStage === "preview")
+      return route.fulfill({
+        json: {
+          ...receipt,
+          importNotes: [
+            "The newsletter does not give an official deadline for the reading grant.",
+          ],
+        },
+      });
+    if (state.ai.length === 2)
+      return route.fulfill({
+        status: 503,
+        json: { error: "Saving is temporarily unavailable. Try again." },
+      });
+    state.grants = body.selectedIndexes.map((index: number) => ({
+      ...opportunity,
+      ...candidates[index],
+    }));
+    return route.fulfill({
+      json: {
+        opportunities: state.grants,
+        importedCount: 1,
+        duplicateCount: 0,
+        message: "Added 1 opportunity.",
+      },
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  const open = page.getByRole("button", { name: "Import grants", exact: true });
+  await open.click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("button", { name: "Read with AI" }),
+  ).toBeDisabled();
+  await dialog.getByLabel("Report text").fill(text);
+  await dialog.getByRole("button", { name: "Read with AI" }).click();
+  await expect(dialog).toHaveAccessibleName("Review grant opportunities");
+  await expect(dialog.getByText("Source link needed")).toBeVisible();
+  await expect(
+    dialog.getByText(/does not give an official deadline/),
+  ).toBeVisible();
+  await expect(
+    dialog.getByText(/Closes 8 Mar 2027 · Time to confirm/),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("link", { name: "Source link in report" }),
+  ).toHaveAttribute("href", candidate.source_url);
+  expect(
+    await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  expect(state.ai).toHaveLength(1);
+  expect(state.ai[0]).toMatchObject({
+    action: "import-grant",
+    importStage: "preview",
+    text,
+    documentIds: [],
+  });
+  expect(state.grants).toHaveLength(0);
+  await expect(page.locator(".grant-card")).toHaveCount(0);
+  const parks = dialog.getByRole("checkbox", { name: candidate.title });
+  await parks.uncheck();
+  await dialog.getByRole("checkbox", { name: candidates[1].title }).uncheck();
+  await expect(
+    dialog.getByRole("button", { name: "Save selected (0)" }),
+  ).toBeDisabled();
+  await parks.check();
+  const save = dialog.getByRole("button", { name: "Save selected (1)" });
+  await save.click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Saving is temporarily unavailable",
+  );
+  await expect(parks).toBeChecked();
+  await save.click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.ai[1]).toMatchObject({
+    action: "import-grant",
+    importStage: "save",
+    selectedIndexes: [0],
+    ...receipt,
+  });
+  expect(state.ai[2]).toEqual(state.ai[1]);
+  await expect(page.locator(".grant-card")).toHaveCount(1);
+  await expect(page.locator(".grant-card")).toContainText(candidate.title);
+  await expect(open).toBeFocused();
+});
+
+test("an empty import preview lets the reader revise the report or cancel without saving", async ({
+  page,
+}) => {
+  const state = await mockGrantWorkspace(page, { grants: [] });
+  await page.route("**/api/ai", (route) => {
+    state.ai.push(route.request().postDataJSON());
+    return route.fulfill({
+      json: {
+        importCandidates: [],
+        sourceFingerprint: fingerprint,
+        stageIssuedAt: Date.now(),
+      },
+    });
+  });
+  await page.goto(`/?view=opportunities&org=${orgId}`);
+  await page
+    .getByRole("button", { name: "Import grants", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  const input = dialog.getByLabel("Report text");
+  const read = dialog.getByRole("button", { name: "Read with AI" });
+  await input.fill("x".repeat(40_001));
+  await expect(dialog.getByRole("alert")).toContainText("40,000");
+  await expect(read).toBeDisabled();
+  const original =
+    "Our newsletter this month is about plans to research local community funding.";
+  await input.fill(original);
+  await read.click();
+  await expect(dialog.getByRole("status")).toContainText(
+    "No grant opportunities found",
+  );
+  await expect(
+    dialog.getByRole("button", { name: /Save selected/ }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Back to report" }).click();
+  await expect(input).toHaveValue(original);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  expect(state.ai.map((request) => request.importStage)).toEqual(["preview"]);
 });

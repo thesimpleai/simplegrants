@@ -1,4 +1,5 @@
 import type { ApplicationResearch } from "./lib/application-research";
+import type { GrantImportCandidate } from "./lib/grant-import";
 import type {
   SetupQuestionKey,
   SetupSuggestion,
@@ -80,6 +81,7 @@ export interface Organisation {
 }
 export interface UploadBatchResult {
   saved: string[];
+  savedDocumentIds: string[];
   failed: { name: string; reason: string }[];
   skipped: { name: string; reason: string }[];
 }
@@ -173,9 +175,13 @@ export interface ReviewCheck {
   suggestion?: string;
 }
 export type ProfileStage = "extract" | "verify" | "correct";
+export type DiscoveryStage = "search" | "verify" | "extract";
 export interface SearchDraft {
   summary: string;
-  sources: { title: string; uri: string }[];
+  sources: { title: string; uri: string; excerpt?: string }[];
+  phase?: "search" | "verified";
+  completed_lanes?: number;
+  failed_lanes?: number;
 }
 export interface DraftRequirement {
   label: string;
@@ -201,6 +207,10 @@ export interface DraftRequirements {
   })[];
 }
 export interface AIResult {
+  importCandidates?: GrantImportCandidate[];
+  importNotes?: string[];
+  importedCount?: number;
+  duplicateCount?: number;
   setupSuggestions?: SetupSuggestion[];
   setupConflicts?: {
     questionKey: SetupQuestionKey;

@@ -124,12 +124,13 @@ publicHistoryParts["xl/worksheets/sheet1.xml"] = strToU8(
   '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Organisation</t></is></c><c r="B1" t="inlineStr"><is><t>State</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Runtime Community Association</t></is></c><c r="B2" t="inlineStr"><is><t>VIC</t></is></c></row></sheetData></worksheet>',
 );
 const publicHistory = zipSync(publicHistoryParts);
+export const charterText = [
+  "Runtime Community Association",
+  "Fictional incorporated association in Victoria.",
+  "Community gardening workshops for local families.",
+].join("\n");
 function sourcePDF() {
-  const lines = [
-    "Runtime Community Association",
-    "Fictional incorporated association in Victoria.",
-    "Community gardening workshops for local families.",
-  ];
+  const lines = charterText.split("\n");
   const content = `BT /F1 12 Tf 50 740 Td ${lines.map((line, index) => `${index ? "0 -20 Td " : ""}(${line}) Tj`).join(" ")} ET`;
   const parts = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -212,22 +213,150 @@ function libraryDocument(doc) {
     },
   };
 }
+export const discoveryFixture = {
+  title: "Fictional runtime search opportunity",
+  preliminaryUrl: "https://www.grants.gov.au/?event=public.GO.list",
+  officialRedirect:
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/runtime-test",
+  officialUrl: "https://www.grants.gov.au/runtime-test",
+  closedTitle: "Fictional closed runtime opportunity",
+  closedUrl: "https://www.grants.gov.au/runtime-test/closed",
+  equipmentTitle: "Fictional capital equipment runtime opportunity",
+  equipmentUrl: "https://www.grants.gov.au/runtime-test/equipment",
+  datedTitle: "Fictional date-only runtime opportunity",
+  datedUrl: "https://www.grants.gov.au/runtime-test/date-only",
+  retrievedDateTitle: "Fictional retrieved runtime opportunity",
+  retrievedDateUrl: "https://www.grants.gov.au/runtime-test/retrieved-date",
+  deadlineDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10),
+  openEvidence: "Applications are accepted year-round for community workshops.",
+  closedEvidence: "This round closed and applications are no longer accepted.",
+  equipmentEvidence:
+    "This rolling intake funds capital equipment only. Community workshops are ineligible.",
+};
+
+export const grantReportFixture = {
+  fileName: "regional-grant-research.txt",
+  fileText:
+    "Research notes from a community network. Community Kitchen Access Fund 2027, administered by the fictional Regional Giving Trust. Up to $4,500 for shared-kitchen access in Victoria. Closing date 31 March 2027. Time and timezone not provided. https://regional-giving.example/kitchen",
+  pastedText:
+    "Possibility from a planning email: Neighbourhood Tool Library Microgrant 2027. The fictional Tool Share Foundation is offering grants up to $2,000 for local tool libraries. The email gives no confirmed closing date. https://tool-share.example/microgrants",
+  selectedTitle: "Community Kitchen Access Fund 2027",
+  skippedTitle: "Neighbourhood Tool Library Microgrant 2027",
+};
+
 export function providerReply(body) {
   const properties = body.generationConfig?.responseSchema?.properties;
-  let text, groundingMetadata;
+  let text, groundingMetadata, urlContextMetadata;
   if (body.tools) {
-    text =
-      "Fictional runtime search opportunity. Confirm dates and eligibility with the provider.";
+    const prompt = body.contents[0].parts[0].text;
+    const verification = prompt.startsWith("Verify this shortlist");
+    const {
+      title,
+      preliminaryUrl,
+      officialRedirect,
+      officialUrl,
+      closedTitle,
+      closedUrl,
+      equipmentTitle,
+      equipmentUrl,
+      datedTitle,
+      datedUrl,
+      retrievedDateTitle,
+      retrievedDateUrl,
+      deadlineDate,
+      openEvidence,
+      closedEvidence,
+      equipmentEvidence,
+    } = discoveryFixture;
+    const dateEvidence = `The published closing date is ${deadlineDate}.`;
+    const timeConflict = `Both pages list ${deadlineDate}. The guidelines say 3 pm and the form says 5 pm.`;
+    text = verification
+      ? [
+          `${title} (rolling). ${openEvidence}`,
+          `${closedTitle}. ${closedEvidence}`,
+          `${equipmentTitle}. ${equipmentEvidence}`,
+          `${datedTitle}. ${dateEvidence}`,
+          `${retrievedDateTitle}. ${timeConflict}`,
+        ].join("\n")
+      : `${title}. Preliminary listing only. Check the provider for the current round.\n${closedTitle} may be historical.\n${equipmentTitle} may not cover the organisation's work.`;
+    const portal = {
+      web: { title: "Fictional generic funder portal", uri: preliminaryUrl },
+    };
     groundingMetadata = {
-      groundingChunks: [
-        {
-          web: {
-            title: "Fictional source fixture",
-            uri: "https://www.grants.gov.au/runtime-test",
+      groundingChunks: verification
+        ? [
+            { web: { title, uri: officialRedirect } },
+            { web: { title: closedTitle, uri: closedUrl } },
+            { web: { title: equipmentTitle, uri: equipmentUrl } },
+            { web: { title: datedTitle, uri: datedUrl } },
+            { web: { title: retrievedDateTitle, uri: retrievedDateUrl } },
+            portal,
+          ]
+        : [{ web: { title, uri: officialRedirect } }, portal],
+      ...(verification
+        ? {
+            groundingSupports: [
+              { segment: { text: openEvidence }, groundingChunkIndices: [0] },
+              { segment: { text: closedEvidence }, groundingChunkIndices: [1] },
+              {
+                segment: { text: equipmentEvidence },
+                groundingChunkIndices: [2],
+              },
+              { segment: { text: dateEvidence }, groundingChunkIndices: [3] },
+              { segment: { text: timeConflict }, groundingChunkIndices: [4] },
+            ],
+          }
+        : {}),
+    };
+    if (verification && body.tools.some((tool) => tool.urlContext))
+      urlContextMetadata = {
+        urlMetadata: [
+          {
+            retrievedUrl: officialUrl,
+            urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS",
           },
+          {
+            retrievedUrl: retrievedDateUrl,
+            urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS",
+          },
+        ],
+      };
+  } else if (properties?.importCandidates) {
+    const empty = {
+      amount_min: null,
+      opens_on: null,
+      closes_at: null,
+      focus_areas: [],
+      requirements: [],
+    };
+    text = JSON.stringify({
+      importCandidates: [
+        {
+          ...empty,
+          title: grantReportFixture.selectedTitle,
+          funder: "Regional Giving Trust",
+          summary: "Supports shared-kitchen access in Victoria.",
+          source_url: "https://regional-giving.example/kitchen",
+          amount_max: 4500,
+          closing_date: "2027-03-31",
+          deadline_text:
+            "Closing date 31 March 2027. Time and timezone not provided.",
+          location: "Victoria",
+        },
+        {
+          ...empty,
+          title: grantReportFixture.skippedTitle,
+          funder: "Tool Share Foundation",
+          summary: "Funds local tool libraries.",
+          source_url: "https://tool-share.example/microgrants",
+          amount_max: 2000,
+          location: "",
         },
       ],
-    };
+      has_more: false,
+    });
   } else if (properties?.profile)
     text = JSON.stringify({
       profile,
@@ -287,6 +416,7 @@ export function providerReply(body) {
           evidence: [
             "Budget.xlsx Budget!D2: unverified saved formula value 1000",
           ],
+          coverage: "partial",
           needs_review: true,
         },
       ],
@@ -302,16 +432,63 @@ export function providerReply(body) {
       ],
       submission_checklist: ["Authorised review of all facts and figures"],
       human_review_required: true,
+      readiness_review: {
+        criteria: {
+          coverage: "partial",
+          note: "The fictional survey supports the need.",
+        },
+        delivery: {
+          coverage: "partial",
+          note: "Confirm the proposed dates and roles.",
+        },
+        budget: {
+          coverage: "partial",
+          note: "Review the saved workbook value before use.",
+        },
+        suggestions: [],
+      },
     });
-  else if (properties?.opportunities)
+  else if (properties?.opportunities) {
+    const prompt = body.contents[0].parts[0].text;
+    const citedSources = JSON.parse(
+      prompt.split("\nSOURCES: ")[1].split("\nGROUNDED RESULTS")[0],
+    );
+    const indexOfSource = (uri) => {
+      const source = citedSources.find((source) => source.uri === uri);
+      if (!source) throw Error(`Missing verified fixture source: ${uri}`);
+      return source.index;
+    };
+    const rollingOpportunity = {
+      title: discoveryFixture.title,
+      funder: "Fictional source fixture",
+      summary:
+        "Fictional fixture. Dates and eligibility need confirmation with the provider.",
+      source_index: indexOfSource(discoveryFixture.officialUrl),
+      round_status: "rolling",
+      closing_date: null,
+      fit: "potential",
+      fit_note: "Supports community workshops.",
+      amount_min: null,
+      amount_max: null,
+      opens_on: null,
+      closes_at: null,
+      location: "VIC",
+      focus_areas: ["Community"],
+      requirements: [],
+    };
     text = JSON.stringify({
       opportunities: [
+        rollingOpportunity,
+        { ...rollingOpportunity, title: discoveryFixture.title.toUpperCase() },
         {
-          title: "Fictional runtime search opportunity",
+          title: discoveryFixture.closedTitle,
           funder: "Fictional source fixture",
-          summary:
-            "Fictional fixture. Dates and eligibility need confirmation with the provider.",
-          source_index: 0,
+          summary: discoveryFixture.closedEvidence,
+          source_index: indexOfSource(discoveryFixture.closedUrl),
+          round_status: "closed",
+          closing_date: null,
+          fit: "ineligible",
+          fit_note: "The application round has closed.",
           amount_min: null,
           amount_max: null,
           opens_on: null,
@@ -320,15 +497,45 @@ export function providerReply(body) {
           focus_areas: ["Community"],
           requirements: [],
         },
+        {
+          ...rollingOpportunity,
+          title: discoveryFixture.equipmentTitle,
+          summary: discoveryFixture.equipmentEvidence,
+          source_index: indexOfSource(discoveryFixture.equipmentUrl),
+          fit: "ineligible",
+          fit_note: "The grant only allows capital equipment.",
+        },
+        {
+          ...rollingOpportunity,
+          title: discoveryFixture.datedTitle,
+          summary: "This round supports community workshops.",
+          source_index: indexOfSource(discoveryFixture.datedUrl),
+          round_status: "open",
+          closing_date: discoveryFixture.deadlineDate,
+          closes_at: `${discoveryFixture.deadlineDate}T17:00:00+11:00`,
+        },
+        {
+          ...rollingOpportunity,
+          title: discoveryFixture.retrievedDateTitle,
+          summary: "This confirmed round supports community workshops.",
+          source_index: indexOfSource(discoveryFixture.retrievedDateUrl),
+          round_status: "open",
+          closing_date: discoveryFixture.deadlineDate,
+          closes_at: `${discoveryFixture.deadlineDate}T17:00:00+11:00`,
+          deadline_conflict: true,
+          deadline_note:
+            "The guidelines and application form give different closing times.",
+        },
       ],
     });
-  else throw Error("Unexpected provider schema in runtime test");
+  } else throw Error("Unexpected provider schema in runtime test");
   return {
     candidates: [
       {
         content: { role: "model", parts: [{ text }] },
         finishReason: "STOP",
         ...(groundingMetadata ? { groundingMetadata } : {}),
+        ...(urlContextMetadata ? { urlContextMetadata } : {}),
       },
     ],
   };

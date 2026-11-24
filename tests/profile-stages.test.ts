@@ -35,7 +35,8 @@ const check = {
 let role: string | null,
   fileText: string,
   documents: Record<string, unknown>[],
-  reverseDocuments: boolean;
+  reverseDocuments: boolean,
+  extractedText: Map<string, Record<string, unknown>>;
 const document = (id = docId) => ({
   id,
   org_id: orgId,
@@ -47,13 +48,25 @@ const document = (id = docId) => ({
   verified: false,
   expires_on: null,
 });
-function fakeDb() {
+function extractionKey(row: Record<string, unknown>) {
+  return JSON.stringify([
+    row.org_id,
+    row.document_id,
+    row.source_sha256,
+    row.extraction_version,
+  ]);
+}
+function fakeDb(service: boolean) {
   return {
     rpc: mocks.rpc,
     auth: { getUser: mocks.getUser },
     storage: { from: () => ({ download: mocks.download }) },
     from(table: string) {
       mocks.from(table);
+      if (table === "document_text_extracts" && !service)
+        throw new Error("Only the server may access document extracts");
+      let sourceKey = "";
+      let inserted: Record<string, unknown> | undefined;
       const result = () => {
         if (table === "organization_members")
           return { data: role ? { role } : null, error: null };
@@ -77,12 +90,30 @@ function fakeDb() {
             error: null,
           };
         }
+        if (table === "document_text_extracts") {
+          if (inserted) {
+            if (extractedText.has(sourceKey))
+              return { data: null, error: null };
+            extractedText.set(sourceKey, inserted);
+          }
+          return { data: extractedText.get(sourceKey) ?? null, error: null };
+        }
         throw new Error(`Unexpected table ${table}`);
       };
       const chain = {
         select: () => chain,
         eq: () => chain,
         in: () => chain,
+        abortSignal: () => chain,
+        match: (filters: Record<string, unknown>) => {
+          sourceKey = extractionKey(filters);
+          return chain;
+        },
+        upsert: (value: Record<string, unknown>) => {
+          sourceKey = extractionKey(value);
+          inserted = value;
+          return chain;
+        },
         single: async () => result(),
         maybeSingle: async () => result(),
         update: (value: unknown) => {
@@ -126,12 +157,14 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.stubEnv("SUPABASE_URL", "https://example.supabase.co");
   vi.stubEnv("SUPABASE_ANON_KEY", "test-public-key");
+  vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-key");
   vi.stubEnv("GEMINI_API_KEY", "test-model-key");
   role = "member";
   fileText =
     "ORIGINAL FILE: Community Club Incorporated registration evidence.";
   documents = [document()];
   reverseDocuments = false;
+  extractedText = new Map();
   mocks.rpc.mockResolvedValue({ data: true, error: null });
   mocks.getUser.mockResolvedValue({
     data: { user: { id: "member-id" } },
@@ -141,7 +174,9 @@ beforeEach(() => {
     data: new Blob([fileText]),
     error: null,
   }));
-  mocks.createClient.mockReturnValue(fakeDb());
+  mocks.createClient.mockImplementation((_url, key) =>
+    fakeDb(key === "test-service-key"),
+  );
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -345,9 +380,7 @@ describe("separate authenticated profile stages", () => {
       documentIds: [docId, secondId, thirdId],
     });
     expect(response.status).toBe(413);
-    expect((await response.json()).error).toContain(
-      "no text has been truncated",
-    );
+    expect((await response.json()).error).toContain("too much text");
     expect(mocks.generateContent).not.toHaveBeenCalled();
     expect(mocks.write).not.toHaveBeenCalled();
   });
@@ -395,6 +428,57 @@ describe("source-based grant setup", () => {
   function setup(extra: Record<string, unknown> = {}) {
     return call({ action: "setup-source", text: "", ...extra });
   }
+
+  it("grounds a normalised company number in its original quote and drops equivalent suggestions", async () => {
+    const quote = "Australian Company Number: 601 234 567.";
+    const longerQuote = "Another reference: 601234567123.";
+    model({
+      suggestions: [
+        { questionKey: "registration_number", textValue: "601234567", quote },
+        { questionKey: "registration_number", textValue: "601 234 567", quote },
+        { questionKey: "abn", textValue: "60123456712", quote: longerQuote },
+      ],
+    });
+    const response = await setup({
+      documentIds: [],
+      text: `${quote}\n${longerQuote}`,
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).setupSuggestions).toEqual([
+      expect.objectContaining({
+        questionKey: "registration_number",
+        value: "601234567",
+        quote,
+      }),
+    ]);
+  });
+
+  it("does not send a formatting-only company number dispute to Gemini", async () => {
+    const reply = await setup({
+      action: "setup-conflicts",
+      documentIds: [],
+      conflicts: [
+        {
+          questionKey: "registration_number",
+          candidates: [
+            {
+              value: "601 234 567",
+              quote: "ACN: 601 234 567",
+              sourceLabel: "Certificate",
+            },
+            {
+              value: "ACN 601234567",
+              quote: "ACN 601234567",
+              sourceLabel: "Public report",
+            },
+          ],
+        },
+      ],
+    });
+    expect(reply.status).toBe(400);
+    expect(mocks.generateContent).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
 
   it("returns only evidenced, typed suggestions and never forwards visible credentials from pasted text", async () => {
     const legalName = suggestionText.quote;
@@ -516,10 +600,15 @@ describe("source-based grant setup", () => {
     expect(mocks.generateContent).toHaveBeenCalledOnce();
   });
 
-  it("labels visual evidence as not locally text-checked", async () => {
+  it("quotes an AI transcription and reuses saved text on a later request", async () => {
     documents = [
       { ...document(), name: "register.pdf", mime_type: "application/pdf" },
     ];
+    const transcription = `[Page 1]\n${suggestionText.quote}\nOther source context.`;
+    mocks.generateContent.mockResolvedValueOnce({
+      text: transcription,
+      candidates: [{ finishReason: "STOP" }],
+    });
     model({ suggestions: [{ ...suggestionText, locator: "Page 1" }] });
     const response = await setup();
     expect(response.status).toBe(200);
@@ -537,10 +626,59 @@ describe("source-based grant setup", () => {
       ],
     });
     expect(
-      mocks.generateContent.mock.calls[0][0].contents[0].parts[2].inlineData
+      mocks.generateContent.mock.calls[0][0].contents[0].parts[1].inlineData
         .mimeType,
     ).toBe("application/pdf");
+    expect(mocks.rpc.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.generateContent.mock.invocationCallOrder[0],
+    );
+    expect(mocks.generateContent.mock.calls[1][0].contents[0].parts[2]).toEqual(
+      {
+        text: transcription,
+      },
+    );
+    expect([...extractedText.values()]).toEqual([
+      expect.objectContaining({ method: "ocr", text: transcription }),
+    ]);
+    model({ suggestions: [{ ...suggestionText, locator: "Page 1" }] });
+    expect((await setup()).status).toBe(200);
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3);
+    expect(mocks.generateContent.mock.calls[2][0].contents[0].parts[2]).toEqual(
+      {
+        text: transcription,
+      },
+    );
+    expect(mocks.rpc).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ["MAX_TOKENS", "[Page 1]\nPartial transcript", 413],
+    ["STOP", "[Page 1]\n[illegible]", 422],
+  ])(
+    "keeps the source retriable when OCR finishes with %s and unusable text",
+    async (finishReason, text, status) => {
+      documents = [
+        { ...document(), name: "register.pdf", mime_type: "application/pdf" },
+      ];
+      mocks.generateContent.mockResolvedValueOnce({
+        text,
+        candidates: [{ finishReason }],
+      });
+      expect((await setup()).status).toBe(status);
+      expect(extractedText.size).toBe(0);
+      expect(mocks.generateContent).toHaveBeenCalledOnce();
+
+      mocks.generateContent.mockResolvedValueOnce({
+        text: `[Page 1]\n${suggestionText.quote}`,
+        candidates: [{ finishReason: "STOP" }],
+      });
+      model({ suggestions: [suggestionText] });
+      const retried = await setup();
+      expect(retried.status).toBe(200);
+      expect((await retried.json()).setupSuggestions).toHaveLength(1);
+      expect(extractedText.size).toBe(1);
+    },
+  );
 
   it.each([
     { category: "financial_statement", includeInsurance: true },

@@ -90,8 +90,8 @@ async function mockWorkspace(page: Page, documents: DocumentRecord[] = []) {
     const body = route.request().postDataJSON();
     state.inserted.push(body);
     state.documents.push({
-      ...body,
       id: `00000000-0000-4000-8000-${String(state.inserted.length).padStart(12, "0")}`,
+      ...body,
       created_at: "2026-01-01T00:00:00Z",
     });
     return route.fulfill({ json: { error: null } });
@@ -232,7 +232,7 @@ test("one failed file does not stop later files and the summary names saved and 
   ).toBeVisible();
 });
 
-test("the organisation switcher closes on Escape or an outside click and steps have one numbering source", async ({
+test("the organisation switcher closes on Escape or an outside click", async ({
   page,
 }) => {
   await mockWorkspace(page);
@@ -247,12 +247,9 @@ test("the organisation switcher closes on Escape or an outside click and steps h
     .getByRole("heading", { name: "A home for your organisation." })
     .click();
   await expect(page.locator(".org-dropdown")).toHaveCount(0);
-  await expect(page.locator(".simple-steps li")).toHaveText([
-    "Find answers one source at a time",
-    "Compare any disagreements",
-    "Review answers and see what evidence is missing",
-  ]);
-  await expect(page.locator(".simple-steps li span")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Set up for grants" }),
+  ).toBeVisible();
 });
 
 test("last selected organisation is scoped to user and project while a valid URL org wins", async ({

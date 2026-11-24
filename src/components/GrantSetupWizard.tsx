@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AIResult, DocumentRecord, Organisation } from "../types";
+import type {
+  AIResult,
+  DocumentRecord,
+  Organisation,
+  UploadBatchResult,
+} from "../types";
 import { AIRequestError, useApp } from "../lib/app-context";
 import { MAX_AI_DOCUMENTS } from "../lib/document-formats";
 import { isInsuranceCategory } from "../lib/grant-requirements";
@@ -15,8 +20,8 @@ import {
   isSetupQuestionKey,
   readSetupAnswers,
   setupProfileAnswer,
+  setupQuestionByKey,
   setupQuestionnaire,
-  suggestSetupDocuments,
   type SetupAnswer,
   type SetupAnswerValue,
   type SetupDatedMetric,
@@ -30,6 +35,7 @@ import {
   removeSetupReviewDraft,
   saveSetupReviewDraft,
 } from "../lib/setup-review-draft";
+import GrantSetupSources, { setupSourceCategory } from "./GrantSetupSources";
 import { Busy, Modal, Notice, errorMessage } from "./ui";
 import "./grant-setup.css";
 
@@ -45,6 +51,24 @@ type SetupGroups = ReturnType<typeof aggregateSetupEvidence>;
 
 const sections = [...new Set(setupQuestionnaire.map(({ section }) => section))];
 const CONFLICT_CHECK_BATCH_SIZE = 4;
+
+function websiteURL(value: string) {
+  const input = value.trim();
+  if (!input) return "";
+  try {
+    const url = new URL(input.includes("://") ? input : `https://${input}`);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      !url.hostname.includes(".")
+    )
+      return null;
+    return /^https?:\/\//i.test(input) ? input : `https://${input}`;
+  } catch {
+    return null;
+  }
+}
 
 function conflictChecks(groups: SetupGroups) {
   return setupQuestionnaire.flatMap(({ key }) => {
@@ -187,6 +211,50 @@ function displayValue(value: SetupAnswerValue): string {
   return `${value.value} ${value.unit} · ${period}`;
 }
 
+function SourceExcerpts({
+  suggestions,
+  openOriginal,
+}: {
+  suggestions: SetupSuggestion[];
+  openOriginal: (id: string) => void;
+}) {
+  const {
+    data: { documents },
+  } = useApp();
+  return (
+    <details className="grant-setup-excerpts">
+      <summary>View {suggestions.length === 1 ? "source" : "sources"}</summary>
+      <ul>
+        {suggestions.map(
+          ({ documentId, locator, quote, quoteVerified, sourceLabel }) => (
+            <li key={JSON.stringify([documentId, sourceLabel, locator, quote])}>
+              <span className="small">
+                {sourceLabel}
+                {locator && ` · ${locator}`}
+              </span>
+              {quoteVerified === false && (
+                <p className="small muted">
+                  Check this excerpt against the original.
+                </p>
+              )}
+              <blockquote>{quote}</blockquote>
+              {documentId && documents.some(({ id }) => id === documentId) && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => openOriginal(documentId)}
+                >
+                  Open original
+                </button>
+              )}
+            </li>
+          ),
+        )}
+      </ul>
+    </details>
+  );
+}
+
 function AnswerInput({
   question,
   value,
@@ -287,6 +355,19 @@ function AnswerInput({
     );
   }
 
+  if (question.key === "website") {
+    return (
+      <input
+        aria-label={question.label}
+        autoComplete="url"
+        inputMode="url"
+        maxLength={1500}
+        value={typeof value === "string" ? value : ""}
+        onChange={(event) => onChange(event.target.value || undefined)}
+      />
+    );
+  }
+
   return question.kind === "date" ? (
     <input
       aria-label={question.label}
@@ -324,12 +405,13 @@ export default function GrantSetupWizard({
   const [reviews, setReviews] = useState<ConflictReviews>({});
   const [conflictError, setConflictError] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
-  const [insurance, setInsurance] = useState(false);
   const [paste, setPaste] = useState("");
+  const [uploadReport, setUploadReport] = useState<UploadBatchResult>();
   const [completed, setCompleted] = useState<string[]>([]);
   const [analysedPaste, setAnalysedPaste] = useState("");
   const [sourceErrors, setSourceErrors] = useState<Record<string, string>>({});
   const [reviewing, setReviewing] = useState(false);
+  const [showAllQuestions, setShowAllQuestions] = useState(true);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [saveConfirmed, setSaveConfirmed] = useState(false);
@@ -341,6 +423,7 @@ export default function GrantSetupWizard({
   const [draftError, setDraftError] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
   const [discardError, setDiscardError] = useState("");
+  const intro = useRef<HTMLParagraphElement>(null);
   const draftLoadFailed = useRef(false);
   const active = useRef(true);
   const mayDiscardDraft =
@@ -357,19 +440,26 @@ export default function GrantSetupWizard({
   }, []);
 
   useEffect(() => {
+    if (loadingDraft || discardOpen) return;
+    intro.current?.closest(".modal")?.scrollTo(0, 0);
+    intro.current?.focus({ preventScroll: true });
+  }, [reviewing, loadingDraft, discardOpen]);
+
+  useEffect(() => {
     if (!draftActor) return;
     let cancelled = false;
     loadSetupReviewDraft(organisation.id, draftActor, "grant-setup")
       .then((draft) => {
         if (cancelled || draft?.data.version !== 1) return;
         const data = draft.data;
-        setEvidence(readGrantSetupEvidence(data.evidence));
+        const restoredEvidence = readGrantSetupEvidence(data.evidence);
+        setEvidence(restoredEvidence);
         setEdits(draftEdits(data.edits));
         setReviews(draftConflictReviews(data.reviews));
         setSelected(draftSourceIds(data.selected));
         setCompleted(draftSourceIds(data.completed));
-        setInsurance(data.insurance === true);
         setDraftSaved(true);
+        setShowAllQuestions(restoredEvidence.length === 0);
         setReviewing(true);
       })
       .catch((e) => {
@@ -390,10 +480,11 @@ export default function GrantSetupWizard({
   const pendingConflictChecks = conflictChecks(groups).filter(
     ({ questionKey }) => !reviews[questionKey],
   );
-  const availableSources = app.data.documents.filter(
-    (item) =>
-      ["registration", "acnc", "other"].includes(item.category) ||
-      (insurance && isInsuranceCategory(item.category)),
+  const availableSources = app.data.documents.filter(({ category }) =>
+    Boolean(setupSourceCategory(category)),
+  );
+  const pendingDocuments = availableSources.filter(
+    ({ id }) => selected.includes(id) && !completed.includes(id),
   );
   const coreProfile = {
     ...organisation.profile,
@@ -437,6 +528,42 @@ export default function GrantSetupWizard({
     setSaveConfirmed(false);
   }
 
+  function selectSource(id: string, checked: boolean) {
+    setSelected((ids) =>
+      checked ? [...ids, id] : ids.filter((item) => item !== id),
+    );
+    if (!checked && sourceErrors[id])
+      setSourceErrors(({ [id]: _removed, ...remaining }) => remaining);
+  }
+
+  async function uploadSources(category: string, files: File[]) {
+    if (progress || !files.length) return;
+    setError("");
+    setUploadReport(undefined);
+    setProgress("Uploading documents");
+    try {
+      const result = await app.uploadDocuments(files, category);
+      if (!active.current) return;
+      setUploadReport(result);
+      const room = MAX_AI_DOCUMENTS - pendingDocuments.length;
+      if (
+        !isInsuranceCategory(category) &&
+        result.savedDocumentIds.length &&
+        room > 0
+      ) {
+        setSelected((ids) => [
+          ...ids,
+          ...result.savedDocumentIds.slice(0, room),
+        ]);
+        setDraftDirty(true);
+      }
+    } catch (e) {
+      if (active.current) setError(errorMessage(e));
+    } finally {
+      if (active.current) setProgress("");
+    }
+  }
+
   function recordNewEvidence(
     previous: SetupSuggestion[],
     incoming: SetupSuggestion[],
@@ -444,12 +571,14 @@ export default function GrantSetupWizard({
     documentId?: string,
   ) {
     const next = previous
-      .filter((source) => !documentId || source.documentId !== documentId)
+      .filter((source) => source.documentId !== documentId)
       .concat(incoming);
     const before = aggregateSetupEvidence(previous);
     const after = aggregateSetupEvidence(next);
     const updates = { ...currentEdits };
     for (const question of setupQuestionnaire) {
+      if (question.key === "website" && Object.hasOwn(currentEdits, "website"))
+        continue;
       const prior = currentEdits[question.key] ?? baseline(question);
       if (!prior) continue;
       const alternatives = after[question.key]?.alternatives ?? [];
@@ -495,7 +624,6 @@ export default function GrantSetupWizard({
         edits,
         completed,
         selected,
-        insurance,
         reviews,
       });
       if (active.current) {
@@ -532,8 +660,8 @@ export default function GrantSetupWizard({
       setReviews({});
       setConflictError("");
       setSelected([]);
-      setInsurance(false);
       setPaste("");
+      setUploadReport(undefined);
       setCompleted([]);
       setAnalysedPaste("");
       setSourceErrors({});
@@ -631,15 +759,15 @@ export default function GrantSetupWizard({
 
   async function analyseSources() {
     if (progress) return;
-    const documents = availableSources.filter(
-      ({ id }) => selected.includes(id) && !completed.includes(id),
-    );
     const pasted = paste.trim();
     const sources: {
       label: string;
       document?: DocumentRecord;
       text?: string;
-    }[] = documents.map((document) => ({ label: document.name, document }));
+    }[] = pendingDocuments.map((document) => ({
+      label: document.name,
+      document,
+    }));
     if (pasted && pasted !== analysedPaste)
       sources.push({ label: "Pasted information", text: pasted });
     if (!sources.length) return;
@@ -724,7 +852,10 @@ export default function GrantSetupWizard({
         );
     }
     if (active.current) {
-      setReviewing(true);
+      if (finishedSource) {
+        setShowAllQuestions(current.evidence.length === 0);
+        setReviewing(true);
+      }
       setProgress("");
     }
   }
@@ -732,13 +863,18 @@ export default function GrantSetupWizard({
   const unanswered = setupQuestionnaire.filter(
     (question) => !answerFor(question),
   );
-  const documentRecommendations = [
-    ...new Set(
-      unanswered.flatMap(
-        (question) => suggestSetupDocuments(question, []).recommended,
-      ),
-    ),
-  ];
+
+  function hasEvidenceChoice(question: Question) {
+    const group = groups[question.key];
+    if (!group) return false;
+    const previous = baseline(question);
+    return (
+      group.alternatives.length > 1 ||
+      (previous !== undefined &&
+        (previous.status !== "confirmed" ||
+          !supportedBy(question, previous.value, group.alternatives)))
+    );
+  }
 
   async function saveAnswers() {
     if (!saveConfirmed || progress) return;
@@ -746,13 +882,25 @@ export default function GrantSetupWizard({
     for (const question of setupQuestionnaire) {
       const answer = answerFor(question);
       if (!answer) continue;
-      const choice =
+      let choice =
         answer.status === "confirmed" && Array.isArray(answer.value)
           ? {
               status: "confirmed" as const,
               value: answer.value.map((item) => item.trim()).filter(Boolean),
             }
           : answer;
+      if (
+        question.key === "website" &&
+        choice.status === "confirmed" &&
+        typeof choice.value === "string"
+      ) {
+        const url = websiteURL(choice.value);
+        if (!url) {
+          setError("Enter a valid public website address or leave it blank.");
+          return;
+        }
+        choice = { status: "confirmed", value: url };
+      }
       const confirmed = chooseSetupAnswer(
         question,
         choice,
@@ -809,8 +957,25 @@ export default function GrantSetupWizard({
   }
 
   const pending =
-    selected.some((id) => !completed.includes(id)) ||
+    pendingDocuments.length > 0 ||
     Boolean(paste.trim() && paste.trim() !== analysedPaste);
+  const websiteAnswer = answerFor(setupQuestionByKey.website);
+  const website =
+    websiteAnswer?.status === "confirmed" &&
+    typeof websiteAnswer.value === "string"
+      ? websiteAnswer.value
+      : "";
+  const disagreements = unanswered.filter(hasEvidenceChoice).length;
+  const visibleQuestions = setupQuestionnaire.filter(
+    (question) =>
+      showAllQuestions || groups[question.key] || answerFor(question),
+  );
+  const firstSuggestedSection = setupQuestionnaire.find(
+    ({ key }) => groups[key],
+  )?.section;
+  const uploadIssues = uploadReport
+    ? [...uploadReport.failed, ...uploadReport.skipped]
+    : [];
   const mayApprove =
     organisation.verification_status !== "approved" &&
     answerFor(setupQuestionnaire.find(({ key }) => key === "description")!)
@@ -879,7 +1044,7 @@ export default function GrantSetupWizard({
             {draftError}
           </p>
         )}
-        {mayDiscardDraft && (
+        {mayDiscardDraft && reviewing && (
           <div className="section-actions">
             {draftSaved && !draftDirty && !draftError && !progress && (
               <p className="small muted" role="status">
@@ -920,124 +1085,138 @@ export default function GrantSetupWizard({
           </p>
         ) : !reviewing ? (
           <>
-            <p className="muted">
-              Build a reusable set of grant answers. Your assistant works
-              through one source at a time and brings back answers with
-              supporting excerpts.
+            <p className="muted" ref={intro} tabIndex={-1}>
+              Add any documents you have. We’ll use the files you select to
+              suggest grant answers for you to review.
             </p>
-            <details className="grant-setup-section">
-              <summary>See all {setupQuestionnaire.length} questions</summary>
-              {sections.map((section) => (
-                <div key={section}>
-                  <h3>{section}</h3>
-                  <ul>
-                    {setupQuestionnaire
-                      .filter((item) => item.section === section)
-                      .map((item) => (
-                        <li key={item.key}>{item.label}</li>
-                      ))}
-                  </ul>
-                </div>
-              ))}
-            </details>
-            <label>
-              Paste a public or redacted excerpt
-              <textarea
-                className="grant-setup-answer"
-                maxLength={30000}
-                rows={4}
-                value={paste}
-                disabled={!!progress}
-                onChange={(event) => setPaste(event.target.value)}
-              />
-            </label>
-            <fieldset disabled={!!progress}>
-              <legend>Choose documents already in your library</legend>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={insurance}
-                  onChange={(event) => {
-                    const checked = event.target.checked;
-                    setInsurance(checked);
-                    if (!checked)
-                      setSelected((ids) =>
-                        ids.filter(
-                          (id) =>
-                            !app.data.documents.some(
-                              (doc) =>
-                                doc.id === id &&
-                                isInsuranceCategory(doc.category),
-                            ),
-                        ),
-                      );
-                  }}
-                />
-                Include insurance certificates in the AI review
-              </label>
-              {availableSources.length ? (
-                availableSources.map((source) => (
-                  <label key={source.id} className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(source.id)}
-                      disabled={
-                        !selected.includes(source.id) &&
-                        selected.length >= MAX_AI_DOCUMENTS
-                      }
-                      onChange={(event) =>
-                        setSelected((ids) =>
-                          event.target.checked
-                            ? [...ids, source.id]
-                            : ids.filter((id) => id !== source.id),
-                        )
-                      }
-                    />
-                    <span>
-                      {source.name}
-                      {completed.includes(source.id) && (
-                        <small> · Analysed</small>
-                      )}
-                    </span>
-                  </label>
-                ))
-              ) : (
-                <p className="small muted">
-                  Add a public source in your document library, paste an
-                  excerpt, or answer manually.
-                </p>
-              )}
-            </fieldset>
-            <p className="small muted">
-              Choose up to {MAX_AI_DOCUMENTS} documents per run. Keep private
-              financial statements and audits in your library. For the financial
-              questions, use a published summary, a redacted excerpt, or a
-              manual answer.
-            </p>
-            <div className="section-actions">
+            {app.mode === "demo" && (
+              <p className="small muted">
+                You can enter answers manually in the demo.
+              </p>
+            )}
+            <div className="section-actions grant-setup-actions">
               <button
                 className="button primary"
+                type="button"
                 onClick={analyseSources}
                 disabled={!pending || !!progress || app.mode === "demo"}
               >
-                Analyse pending sources
+                Suggest answers
               </button>
               <button
                 className="button secondary"
-                onClick={() => setReviewing(true)}
+                type="button"
+                onClick={() => {
+                  setShowAllQuestions(true);
+                  setReviewing(true);
+                }}
                 disabled={!!progress}
               >
-                Review or answer manually
+                Enter answers manually
               </button>
             </div>
+            <GrantSetupSources
+              documents={availableSources}
+              selected={selected}
+              completed={completed}
+              busy={!!progress}
+              demo={app.mode === "demo"}
+              onUpload={uploadSources}
+              onSelect={selectSource}
+            />
+            {uploadReport && (
+              <div
+                className="grant-setup-upload-result"
+                role={uploadReport.failed.length ? "alert" : "status"}
+                aria-label="Setup upload results"
+              >
+                <strong>
+                  {uploadReport.saved.length}{" "}
+                  {uploadReport.saved.length === 1 ? "file" : "files"} added
+                </strong>
+                {uploadIssues.length > 0 && (
+                  <ul>
+                    {uploadIssues.map(({ name, reason }, index) => (
+                      <li key={`${name}-${index}`}>
+                        {name}. {reason}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            <label className="form-field grant-setup-website">
+              <span>
+                Organisation website <span className="muted">(optional)</span>
+              </span>
+              <input
+                inputMode="url"
+                autoComplete="url"
+                aria-label="Organisation website"
+                maxLength={1500}
+                placeholder="https://example.org.au"
+                value={website}
+                disabled={!!progress}
+                onChange={(event) =>
+                  editAnswer(
+                    "website",
+                    event.target.value.trim()
+                      ? { status: "confirmed", value: event.target.value }
+                      : null,
+                  )
+                }
+              />
+            </label>
+            <details
+              className="grant-setup-section"
+              open={paste ? true : undefined}
+            >
+              <summary>Paste public or redacted text</summary>
+              <label className="form-field">
+                Paste a public or redacted excerpt
+                <textarea
+                  className="grant-setup-answer grant-setup-paste"
+                  maxLength={30000}
+                  rows={4}
+                  value={paste}
+                  disabled={!!progress}
+                  onChange={(event) => setPaste(event.target.value)}
+                />
+              </label>
+            </details>
+            <p className="small muted">
+              Use public or redacted information for AI analysis. Keep private
+              financial reports in your document library. Upload up to 10 MB per
+              file.
+            </p>
           </>
         ) : (
           <>
-            <p className="muted">
-              Confirm the answers you want to reuse in grant applications. Where
-              sources disagree, choose the applicable value, enter a correction,
-              or leave the question open.
+            <p className="muted" ref={intro} tabIndex={-1}>
+              {evidence.length
+                ? "Check the suggested answers and fill in what you know."
+                : completed.length || analysedPaste
+                  ? "We found no suggested answers. You can enter what you know."
+                  : "Enter what you know. You can leave questions blank and return later."}
             </p>
+            {disagreements > 0 && (
+              <p className="grant-setup-review-count" role="status">
+                {disagreements}{" "}
+                {disagreements === 1 ? "answer needs" : "answers need"} your
+                review.
+              </p>
+            )}
+            {evidence.length > 0 && (
+              <button
+                className="grant-setup-text-button grant-setup-question-filter"
+                type="button"
+                onClick={() => setShowAllQuestions(!showAllQuestions)}
+              >
+                {showAllQuestions
+                  ? "Hide unanswered questions"
+                  : "Show all questions"}
+              </button>
+            )}
             {pendingConflictChecks.length > 0 && app.mode === "live" && (
               <Notice>
                 <p>
@@ -1055,50 +1234,45 @@ export default function GrantSetupWizard({
                 </button>
               </Notice>
             )}
-            {documentRecommendations.length > 0 && (
-              <Notice>
-                <strong>Documents that could fill gaps</strong>
-                <ul>
-                  {documentRecommendations.slice(0, 6).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-                <p className="small">
-                  Each unanswered question includes more specific suggestions.
-                  Add sources in your document library, then reopen this form.
-                </p>
-              </Notice>
-            )}
             {sections.map((section) => {
-              const questions = setupQuestionnaire.filter(
+              const questions = visibleQuestions.filter(
                 (question) => question.section === section,
               );
-              const disagreements = questions.filter(
-                ({ key }) => groups[key]?.hasConflict,
+              if (!questions.length) return null;
+              const unresolvedComparisons = questions.filter(
+                (question) =>
+                  !answerFor(question) && hasEvidenceChoice(question),
               ).length;
               return (
                 <details
                   key={section}
                   className="grant-setup-section"
-                  open={disagreements > 0 || undefined}
+                  open={
+                    questions.some(hasEvidenceChoice) ||
+                    (!showAllQuestions &&
+                      disagreements === 0 &&
+                      section === firstSuggestedSection) ||
+                    undefined
+                  }
                 >
                   <summary>
-                    {section} ·{" "}
-                    {questions.filter((question) => answerFor(question)).length}{" "}
-                    of {questions.length} answered
-                    {disagreements > 0 ? ` · ${disagreements} to compare` : ""}
+                    <span>{section}</span>
+                    <small>
+                      {unresolvedComparisons > 0
+                        ? `${unresolvedComparisons} to review`
+                        : `${questions.filter((question) => answerFor(question)).length} answered`}
+                    </small>
                   </summary>
                   {questions.map((question) => {
                     const answer = answerFor(question);
                     const group = groups[question.key];
                     const review = reviews[question.key];
                     const previous = baseline(question);
-                    const documents = suggestSetupDocuments(
-                      question,
-                      availableSources.filter(
-                        ({ id }) => !completed.includes(id),
-                      ),
-                    );
+                    const openOriginal = (id: string) => {
+                      void app
+                        .openDocument(id)
+                        .catch((e) => setError(errorMessage(e)));
+                    };
                     return (
                       <fieldset
                         key={question.key}
@@ -1129,9 +1303,15 @@ export default function GrantSetupWizard({
                             Marked as not applicable.
                           </p>
                         )}
-                        {group && (
+                        {group && !hasEvidenceChoice(question) && (
+                          <SourceExcerpts
+                            suggestions={group.alternatives[0].suggestions}
+                            openOriginal={openOriginal}
+                          />
+                        )}
+                        {group && hasEvidenceChoice(question) && (
                           <div className="grant-setup-evidence">
-                            {group.hasConflict && (
+                            {group.hasConflict && !answer && (
                               <strong>
                                 Sources disagree. Which answer applies?
                               </strong>
@@ -1140,7 +1320,7 @@ export default function GrantSetupWizard({
                               group.alternatives.length > 1 && (
                                 <strong>Which reporting period applies?</strong>
                               )}
-                            {!!review?.note && (
+                            {review?.note && !answer && (
                               <p className="small muted">{review.note}</p>
                             )}
                             {group.alternatives.map((alternative, index) => (
@@ -1157,52 +1337,10 @@ export default function GrantSetupWizard({
                                     original before choosing.
                                   </p>
                                 )}
-                                <ul>
-                                  {alternative.suggestions.map((source) => (
-                                    <li
-                                      key={JSON.stringify([
-                                        source.documentId,
-                                        source.locator,
-                                        source.quote,
-                                      ])}
-                                    >
-                                      <span className="small">
-                                        {source.sourceLabel}
-                                        {source.locator
-                                          ? ` · ${source.locator}`
-                                          : ""}
-                                      </span>
-                                      {source.quoteVerified === false && (
-                                        <span className="small muted">
-                                          {" "}
-                                          · Check this excerpt against the
-                                          original
-                                        </span>
-                                      )}
-                                      <blockquote>{source.quote}</blockquote>
-                                      {source.documentId &&
-                                        app.data.documents.some(
-                                          ({ id }) => id === source.documentId,
-                                        ) && (
-                                          <button
-                                            className="button secondary"
-                                            type="button"
-                                            onClick={() =>
-                                              void app
-                                                .openDocument(
-                                                  source.documentId!,
-                                                )
-                                                .catch((e) =>
-                                                  setError(errorMessage(e)),
-                                                )
-                                            }
-                                          >
-                                            Open original
-                                          </button>
-                                        )}
-                                    </li>
-                                  ))}
-                                </ul>
+                                <SourceExcerpts
+                                  suggestions={alternative.suggestions}
+                                  openOriginal={openOriginal}
+                                />
                                 <button
                                   className="button secondary"
                                   type="button"
@@ -1230,11 +1368,11 @@ export default function GrantSetupWizard({
                               Keep saved answer · {displayValue(previous.value)}
                             </button>
                           )}
-                        <div className="section-actions">
+                        <div className="section-actions grant-setup-answer-actions">
                           {answer && (
                             <button
                               type="button"
-                              className="button secondary"
+                              className="grant-setup-text-button"
                               onClick={() => editAnswer(question.key, null)}
                             >
                               Leave unanswered
@@ -1244,7 +1382,7 @@ export default function GrantSetupWizard({
                             answer?.status !== "not_applicable" && (
                               <button
                                 type="button"
-                                className="button secondary"
+                                className="grant-setup-text-button"
                                 onClick={() =>
                                   editAnswer(question.key, {
                                     status: "not_applicable",
@@ -1255,23 +1393,6 @@ export default function GrantSetupWizard({
                               </button>
                             )}
                         </div>
-                        {!answer && (
-                          <div className="small muted">
-                            <p>
-                              Possible sources ·{" "}
-                              {documents.recommended.join(", ")}
-                            </p>
-                            {!!documents.matches.length && (
-                              <p>
-                                In your library ·{" "}
-                                {documents.matches
-                                  .slice(0, 3)
-                                  .map(({ name }) => name)
-                                  .join(", ")}
-                              </p>
-                            )}
-                          </div>
-                        )}
                       </fieldset>
                     );
                   })}

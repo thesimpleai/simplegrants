@@ -95,6 +95,7 @@ test("funded project ledger and milestone changes", async ({ page }) => {
 test("award becomes a funded project", async ({ page }) => {
   await page.goto("/?view=applications");
   await page.locator(".application-row").first().click();
+  await page.getByRole("button", { name: "Submission", exact: true }).click();
   await page
     .getByRole("combobox", { name: "Application status", exact: true })
     .selectOption("awarded");
