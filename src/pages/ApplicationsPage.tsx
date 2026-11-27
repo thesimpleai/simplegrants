@@ -7,6 +7,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useApp } from "../lib/app-context";
+import { applicationIdFromParams } from "../lib/auth-links";
 import {
   Badge,
   Busy,
@@ -193,17 +194,26 @@ export default function ApplicationsPage({
   useEffect(() => {
     if (!app.org) return;
     const key = `simple-grants-open-application:${app.user?.id ?? "demo"}:${app.org.id}`;
-    let pending: string | null = null;
-    try {
-      pending = sessionStorage.getItem(key);
-    } catch {
-      return;
+    const url = new URL(window.location.href);
+    const linked = applicationIdFromParams(url.searchParams);
+    let pending = linked;
+    if (!pending) {
+      try {
+        pending = sessionStorage.getItem(key);
+      } catch {
+        return;
+      }
     }
     const saved = app.data.applications.find(
       (item) => item.id === pending && item.org_id === app.org?.id,
     );
     if (!saved) return;
-    sessionStorage.removeItem(key);
+    if (linked) {
+      url.searchParams.delete("application");
+      window.history.replaceState({}, "", url);
+    } else {
+      sessionStorage.removeItem(key);
+    }
     open(saved);
   }, [app.org?.id, app.user?.id, app.data.applications]);
   function closeEditor() {

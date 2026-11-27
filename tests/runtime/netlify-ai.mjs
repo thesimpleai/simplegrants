@@ -465,7 +465,7 @@ const server = createServer(async (request, response) => {
       return response.end(item.bytes);
     }
     if (url.pathname.startsWith("/api/")) {
-      const name = url.pathname.slice(5);
+      const name = url.pathname.split("/")[2];
       if (name === "ai-jobs") state.polls++;
       const result = await invoke(
         name,
@@ -543,6 +543,7 @@ try {
     SUPABASE_SERVICE_ROLE_KEY: "fixture-service",
     AUTH_APP_URL: "https://simplegrants.com.au",
     AUTH_RATE_LIMIT_SECRET: randomBytes(32).toString("hex"),
+    WORK_MCP_ENABLED: "false",
     ...(!live && !liveCircle
       ? { GEMINI_API_KEY: "fixture-gemini", GEMINI_MODEL: flashModel }
       : {}),
@@ -638,6 +639,8 @@ try {
     "ai-jobs",
     "ai-worker-background",
     "setup-review-drafts",
+    "mcp",
+    "work-oauth",
   ]) {
     const fn = packaged.find((fn) => fn.name === name);
     assert.ok(fn);
@@ -666,6 +669,30 @@ try {
   console.log(
     "PASS: packaged handler accepts Netlify Context and returns JSON before authentication",
   );
+  const previousWorkSetting = process.env.WORK_MCP_ENABLED;
+  try {
+    process.env.WORK_MCP_ENABLED = "true";
+    const origin = process.env.AUTH_APP_URL;
+    const challenge = await invoke("mcp", origin + "/api/mcp", "POST", {});
+    assert.equal(challenge.status, 401);
+    assert.match(
+      challenge.headers.get("www-authenticate"),
+      /oauth-protected-resource\/api\/mcp/,
+    );
+    const resource = await invoke(
+      "work-oauth",
+      origin + "/.netlify/functions/work-oauth?route=protected-resource",
+      "GET",
+      {},
+    );
+    assert.deepEqual((await resource.json()).authorization_servers, [origin]);
+    console.log(
+      "PASS: packaged Work connector challenges and exposes OAuth discovery.",
+    );
+  } finally {
+    if (previousWorkSetting === undefined) delete process.env.WORK_MCP_ENABLED;
+    else process.env.WORK_MCP_ENABLED = previousWorkSetting;
+  }
   await run(
     process.execPath,
     ["node_modules/vite/bin/vite.js", "build", "--outDir", join(root, "site")],

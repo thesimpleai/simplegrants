@@ -35,6 +35,8 @@ This is a deployable first version, not a completed public-launch service. It do
 
 Read **[Deployment instructions](docs/DEPLOYMENT.md)** for Netlify settings, all environment variables, Supabase migrations, email DNS, webhooks and live validation.
 
+For the optional ChatGPT Work connection and skill, see [Connect Simple Grants to ChatGPT Work](docs/CHATGPT-WORK.md).
+
 The frontend uses React, TypeScript and Vite. Netlify Functions hold the Gemini and Resend keys. Supabase supplies Auth, Postgres and private Storage. Use Node 22 or later.
 
 Long AI phases run in Netlify Background Functions with a 90-second model deadline and browser progress polling. Temporary jobs use a server-only prefix in the private bucket and expire after 15 minutes, with hourly cleanup. Document transcripts live separately and follow the lifetime of the source document.

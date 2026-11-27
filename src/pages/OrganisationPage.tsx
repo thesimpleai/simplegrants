@@ -20,6 +20,7 @@ import { useApp } from "../lib/app-context";
 import { GRANT_RESEARCH_CATEGORY } from "../lib/grant-import";
 import type { ProfileReviewCheckpoint } from "../lib/contracts";
 import GrantSetupWizard from "../components/GrantSetupWizard";
+import { WorkConnectionSettings } from "../components/WorkConnection";
 import { ORGANISATION_TYPES, profileValues } from "../lib/profile-values";
 import { validateProfileDates } from "../lib/profile-dates";
 import { mergeReviewedProfile } from "../lib/profile-merge";
@@ -1118,6 +1119,12 @@ export default function OrganisationPage() {
                   sign in.
                 </p>
               </section>
+              {app.mode === "live" && (
+                <WorkConnectionSettings
+                  key={`${app.user?.id}:${org.id}`}
+                  orgId={org.id}
+                />
+              )}
             </div>
           </div>
           <section className="card document-vault">

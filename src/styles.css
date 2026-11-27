@@ -2084,6 +2084,15 @@ td:last-child {
 .login-form > .small {
   margin-top: 25px;
 }
+.work-consent {
+  width: min(100%, 560px);
+  margin: clamp(24px, 12vh, 128px) auto 24px;
+  padding: 0 16px;
+}
+.work-consent .brand {
+  color: var(--ink);
+  margin: 0;
+}
 .sidebar-overlay {
   display: none;
 }

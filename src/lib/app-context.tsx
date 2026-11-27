@@ -382,6 +382,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     params.set("org", id);
     params.delete("grant");
     params.delete("opportunity");
+    params.delete("application");
     window.history.replaceState(
       {},
       "",
