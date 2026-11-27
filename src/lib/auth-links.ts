@@ -8,6 +8,23 @@ const views = new Set([
 ]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function uuidParam(params: URLSearchParams, key: string): string | null {
+  const [id, ...repeated] = params.getAll(key);
+  return !repeated.length && id && uuid.test(id) ? id.toLowerCase() : null;
+}
+
+export function workRequestIdFromParams(
+  params: URLSearchParams,
+): string | null {
+  return uuidParam(params, "work_request");
+}
+
+export function applicationIdFromParams(
+  params: URLSearchParams,
+): string | null {
+  return uuidParam(params, "application");
+}
+
 /** Older shared links use opportunity; new links use grant. Reject ambiguity. */
 export function opportunityIdFromParams(
   params: URLSearchParams,
@@ -41,20 +58,19 @@ export function safeAuthReturnPath(value: unknown): string {
     )
       return "/";
     const params = new URLSearchParams();
+    const workRequest = workRequestIdFromParams(url.searchParams);
+    if (workRequest) return `/?work_request=${workRequest}`;
     const view = url.searchParams.get("view");
     if (url.searchParams.getAll("view").length === 1 && view && views.has(view))
       params.set("view", view);
-    for (const key of ["org"]) {
-      const field = url.searchParams.get(key);
-      if (
-        url.searchParams.getAll(key).length === 1 &&
-        field &&
-        uuid.test(field)
-      )
-        params.set(key, field.toLowerCase());
-    }
+    const org = uuidParam(url.searchParams, "org");
+    if (org) params.set("org", org);
     const grant = opportunityIdFromParams(url.searchParams);
     if (grant) params.set("grant", grant);
+    if (params.get("view") === "applications") {
+      const application = applicationIdFromParams(url.searchParams);
+      if (application) params.set("application", application);
+    }
     return params.size ? `/?${params.toString()}` : "/";
   } catch {
     return "/";

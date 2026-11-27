@@ -65,6 +65,29 @@ describe("Simple Grants authentication return links", () => {
     expect(safeAuthReturnPath("/?view=admin&org=not-a-uuid&grant=x")).toBe("/");
     expect(safeAuthReturnPath("/?view=inbox&view=projects")).toBe("/");
   });
+  it("keeps only the Work request when returning from email sign-in", () => {
+    const hash = new URLSearchParams({
+      token_hash: "a".repeat(56),
+      next: `/?org=${org}&work_request=${grant}&state=untrusted&redirect_uri=https://evil.invalid`,
+    });
+    expect(parseAuthConfirmationHash(`#${hash}`)?.next).toBe(
+      `/?work_request=${grant}`,
+    );
+    expect(
+      safeAuthReturnPath(`/?work_request=${grant}&work_request=${grant}`),
+    ).toBe("/");
+    expect(safeAuthReturnPath("/?work_request=//evil.invalid")).toBe("/");
+  });
+  it("keeps the linked draft only on the applications view", () => {
+    const next = `/?view=applications&org=${org}&application=${grant}`;
+    expect(safeAuthReturnPath(next + "&hint=secret")).toBe(next);
+    expect(safeAuthReturnPath(next + "&application=" + grant)).toBe(
+      `/?view=applications&org=${org}`,
+    );
+    expect(safeAuthReturnPath(`/?view=overview&application=${grant}`)).toBe(
+      "/?view=overview",
+    );
+  });
   it("parses only a fixed email confirmation fragment and validates its return", () => {
     const token = "a".repeat(56);
     const params = new URLSearchParams({

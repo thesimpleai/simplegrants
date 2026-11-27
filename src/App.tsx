@@ -23,7 +23,10 @@ import {
   X,
 } from "lucide-react";
 import { useApp } from "./lib/app-context";
-import { opportunityIdFromParams } from "./lib/auth-links";
+import {
+  opportunityIdFromParams,
+  workRequestIdFromParams,
+} from "./lib/auth-links";
 import OverviewPage from "./pages/OverviewPage";
 import OpportunitiesPage from "./pages/OpportunitiesPage";
 import ApplicationsPage from "./pages/ApplicationsPage";
@@ -32,6 +35,7 @@ import ProjectsPage from "./pages/ProjectsPage";
 import InboxPage from "./pages/InboxPage";
 import { Busy, Modal, Notice, errorMessage } from "./components/ui";
 import Brand from "./components/Brand";
+import { WorkConsent } from "./components/WorkConnection";
 import type { Frequency } from "./types";
 const navigation = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -79,6 +83,9 @@ function WorkspaceConnectionIssue({
 }
 export default function App() {
   const app = useApp();
+  const workRequest = workRequestIdFromParams(
+    new URLSearchParams(window.location.search),
+  );
   const [page, setPage] = useState(currentPage),
     [mobile, setMobile] = useState(false),
     [picker, setPicker] = useState(false),
@@ -221,7 +228,11 @@ export default function App() {
             <Busy label="Checking your sign-in session…" />
           ) : (
             <>
-              <h2>Let’s get you settled in.</h2>
+              <h2>
+                {workRequest
+                  ? "Sign in to connect ChatGPT Work."
+                  : "Let’s get you settled in."}
+              </h2>
               <p>
                 Use your email to sign in securely. No password to remember.
               </p>
@@ -268,8 +279,10 @@ export default function App() {
                 {emailSent && (
                   <Notice>
                     If this address can sign in, you’ll receive an email from
-                    Simple Grants. Open the link, then choose Sign in. Your
-                    grant link will be waiting when you return.
+                    Simple Grants. Open the link, then choose Sign in.
+                    {workRequest
+                      ? " Use the same browser to return to your ChatGPT connection."
+                      : " Your grant link will be waiting when you return."}
                   </Notice>
                 )}
                 {error && (
@@ -285,6 +298,20 @@ export default function App() {
           )}
         </main>
       </div>
+    );
+  if (workRequest && app.user)
+    return (
+      <WorkConsent
+        key={`${workRequest}:${app.user.id}`}
+        requestId={workRequest}
+        organisations={app.organisations}
+        email={app.user.email}
+        loaded={app.organisationsLoaded}
+        workspaceError={Boolean(
+          app.connectionError && !app.organisationsLoaded,
+        )}
+        retryWorkspace={app.retryConnection}
+      />
     );
   return (
     <div className="app-layout">

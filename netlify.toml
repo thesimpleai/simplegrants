@@ -13,6 +13,26 @@
   schedule = "0 * * * *"
 
 [[redirects]]
+  from = "/.well-known/oauth-protected-resource"
+  to = "/.netlify/functions/work-oauth?route=protected-resource"
+  status = 200
+
+[[redirects]]
+  from = "/.well-known/oauth-protected-resource/api/mcp"
+  to = "/.netlify/functions/work-oauth?route=protected-resource"
+  status = 200
+
+[[redirects]]
+  from = "/.well-known/oauth-authorization-server"
+  to = "/.netlify/functions/work-oauth?route=authorization-server"
+  status = 200
+
+[[redirects]]
+  from = "/api/work-oauth/*"
+  to = "/.netlify/functions/work-oauth?route=:splat"
+  status = 200
+
+[[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
